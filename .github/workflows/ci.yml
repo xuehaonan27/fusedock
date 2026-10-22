@@ -1,0 +1,47 @@
+name: ci
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.24.x"
+          cache: true
+      - name: Format
+        if: runner.os != 'Windows'
+        run: test -z "$(gofmt -l cmd internal pkg)"
+      - name: Vet
+        run: go vet ./...
+      - name: Test with race detector
+        if: runner.os != 'Windows'
+        run: go test -race ./...
+      - name: Test Windows
+        if: runner.os == 'Windows'
+        run: go test ./...
+
+  cross-build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.24.x"
+          cache: true
+      - name: Build supported targets
+        run: |
+          GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -o /tmp/fusedock-linux ./cmd/fusedock
+          GOOS=darwin GOARCH=arm64 CGO_ENABLED=0 go build -o /tmp/fusedock-darwin ./cmd/fusedock
+          GOOS=windows GOARCH=amd64 CGO_ENABLED=0 go build -o /tmp/fusedock.exe ./cmd/fusedock
