@@ -1,4 +1,4 @@
-.PHONY: build test macos-bridge macos-fskit test-live-pku test-fuse vet fmt check clean
+.PHONY: build test macos-bridge macos-fskit macos-install test-live-pku test-fuse vet fmt check clean
 
 build:
 	mkdir -p bin
@@ -16,6 +16,10 @@ macos-fskit: macos-bridge
 		-configuration Debug -derivedDataPath macos/FSKit/DerivedData \
 		DEVELOPMENT_TEAM=$${DEVELOPMENT_TEAM:?set DEVELOPMENT_TEAM to your Apple Developer team ID} \
 		-allowProvisioningUpdates build
+	@pluginkit -r "$(CURDIR)/macos/FSKit/DerivedData/Build/Products/Debug/FuseDock.app/Contents/Extensions/FuseDockFSKit.appex" 2>/dev/null || true
+
+macos-install: macos-fskit
+	./scripts/install-macos-fskit.sh
 
 test-live-pku:
 	FUSEDOCK_LIVE_PKU=1 go test -count=1 -run '^TestLivePKULoginPage$$' -v ./internal/providers/pku

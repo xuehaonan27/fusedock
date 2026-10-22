@@ -130,12 +130,11 @@ Provider-specific configuration uses repeatable `--option key=value`. Credential
 FuseDock uses Apple's native FSKit extension on macOS, with no macFUSE or kernel extension. The Swift extension owns the FSKit object model; a Go `c-archive` provides the same provider and VFS core used by Linux and the CLI.
 
 ```sh
-DEVELOPMENT_TEAM=YOUR_TEAM_ID make macos-fskit
-mkdir -p "$HOME/Applications"
-ditto macos/FSKit/DerivedData/Build/Products/Debug/FuseDock.app \
-  "$HOME/Applications/FuseDock.app"
+DEVELOPMENT_TEAM=YOUR_TEAM_ID make macos-install
 open "$HOME/Applications/FuseDock.app"
 ```
+
+`macos-install` also unregisters stale FSKit extensions created by Xcode's temporary build directories, so only the installed FuseDock appears under File System Extensions.
 
 Enable FuseDock under **System Settings → General → Login Items & Extensions → File System Extensions**, then mount:
 

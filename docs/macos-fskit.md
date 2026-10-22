@@ -32,14 +32,11 @@ No macFUSE installation is needed.
 
 ```sh
 make test
-DEVELOPMENT_TEAM=YOUR_TEAM_ID make macos-fskit
-mkdir -p "$HOME/Applications"
-ditto macos/FSKit/DerivedData/Build/Products/Debug/FuseDock.app \
-  "$HOME/Applications/FuseDock.app"
+DEVELOPMENT_TEAM=YOUR_TEAM_ID make macos-install
 open "$HOME/Applications/FuseDock.app"
 ```
 
-The build phase compiles the Go bridge as a Darwin `c-archive`, signs the application and extension, and embeds the FSKit module entitlement. `make macos-fskit` uses automatic provisioning; it may update the developer profile in Xcode.
+The build phase compiles the Go bridge as a Darwin `c-archive`, signs the application and extension, and embeds the FSKit module entitlement. `make macos-fskit` uses automatic provisioning; it may update the developer profile in Xcode. `make macos-install` copies the result to `~/Applications/FuseDock.app` and removes stale PluginKit registrations left by Xcode's DerivedData builds. Rerun it after rebuilding so the system Settings list contains one FuseDock entry.
 
 In the app, click **Open Login Items & Extensions**, then enable **FuseDock** under **File System Extensions**. The extension can be disabled later from the same panel. This approval is a macOS user-security step and cannot be safely bypassed by the build system.
 
