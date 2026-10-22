@@ -22,7 +22,7 @@ jobs:
           cache: true
       - name: Format
         if: runner.os != 'Windows'
-        run: test -z "$(gofmt -l cmd internal pkg)"
+        run: test -z "$(gofmt -l cmd internal pkg macos/bridge)"
       - name: Vet
         run: go vet ./...
       - name: Test with race detector

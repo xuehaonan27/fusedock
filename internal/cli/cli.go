@@ -16,6 +16,7 @@ import (
 	"github.com/spf13/pflag"
 	"golang.org/x/term"
 
+	"github.com/xuehaonan/fusedock/internal/credentials"
 	"github.com/xuehaonan/fusedock/internal/fusefs"
 	"github.com/xuehaonan/fusedock/internal/providers"
 	"github.com/xuehaonan/fusedock/internal/vfs"
@@ -91,16 +92,18 @@ Run 'fusedock providers' for provider IDs and their options.
 }
 
 type providerFlags struct {
-	options       []string
-	credentials   []string
-	credentialEnv []string
-	username      string
+	options        []string
+	credentials    []string
+	credentialEnv  []string
+	credentialFile string
+	username       string
 }
 
 func (f *providerFlags) bind(flags *pflag.FlagSet) {
 	flags.StringArrayVarP(&f.options, "option", "o", nil, "provider option key=value (repeatable)")
 	flags.StringArrayVar(&f.credentials, "credential", nil, "credential key=value (repeatable)")
 	flags.StringArrayVar(&f.credentialEnv, "credential-env", nil, "read credential from environment, key=ENV (repeatable)")
+	flags.StringVar(&f.credentialFile, "credential-file", "", "read credentials from an owner-only key=value file")
 	flags.StringVar(&f.username, "username", "", "shortcut for --credential username=VALUE")
 }
 
@@ -114,11 +117,61 @@ func (f *providerFlags) open(ctx context.Context, factory provider.Factory, prom
 		return nil, err
 	}
 	defer clearSecrets(secrets)
+	if f.credentialFile != "" {
+		fromFile, err := credentials.Read(f.credentialFile)
+		if err != nil {
+			return nil, err
+		}
+		defer clearSecrets(fromFile)
+		if err := mergeCredentialFile(factory.Descriptor(), fromFile, options, secrets); err != nil {
+			return nil, err
+		}
+	}
 	if err := validateInputs(factory.Descriptor(), options, secrets, f.username); err != nil {
 		return nil, err
 	}
 	request := provider.OpenRequest{Username: f.username, Secrets: secrets, Options: options, Prompt: prompt}
 	return factory.Open(ctx, request)
+}
+
+func mergeCredentialFile(descriptor provider.Descriptor, fileValues map[string][]byte, options map[string]string, secrets map[string][]byte) error {
+	if options == nil {
+		options = make(map[string]string)
+	}
+	if secrets == nil {
+		secrets = make(map[string][]byte)
+	}
+	knownOptions := make(map[string]bool, len(descriptor.Options))
+	knownCredentials := make(map[string]bool, len(descriptor.Credentials))
+	for _, option := range descriptor.Options {
+		knownOptions[option.Key] = true
+	}
+	for _, credential := range descriptor.Credentials {
+		knownCredentials[credential.Key] = true
+	}
+	for key, value := range fileValues {
+		if key == "provider" {
+			continue
+		}
+		switch {
+		case knownOptions[key]:
+			if _, exists := options[key]; exists {
+				return fmt.Errorf("option %q is supplied both by flag and credential file", key)
+			}
+			options[key] = string(value)
+		case knownCredentials[key]:
+			if _, exists := secrets[key]; exists {
+				return fmt.Errorf("credential %q is supplied both by flag and credential file", key)
+			}
+			secrets[key] = append([]byte(nil), value...)
+		default:
+			return fmt.Errorf("provider %s does not define key %q in its credential file", descriptor.ID, key)
+		}
+	}
+	if providerID := strings.TrimSpace(string(fileValues["provider"])); providerID != "" && providerID != descriptor.ID {
+		return fmt.Errorf("credential file is for provider %q, not %q", providerID, descriptor.ID)
+	}
+	return nil
 }
 
 func validateInputs(descriptor provider.Descriptor, options map[string]string, secrets map[string][]byte, username string) error {

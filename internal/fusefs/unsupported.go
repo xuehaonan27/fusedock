@@ -1,4 +1,4 @@
-//go:build !linux && !darwin
+//go:build windows
 
 package fusefs
 
@@ -14,5 +14,5 @@ func Mount(context.Context, provider.Session, string, Options) error {
 }
 
 func Preflight(string) error {
-	return errors.New("filesystem mounting is not implemented on this platform")
+	return errors.New("WinFsp mounting is not implemented yet")
 }

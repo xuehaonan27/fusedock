@@ -1,4 +1,4 @@
-//go:build linux || darwin
+//go:build linux
 
 // Package fusefs translates the provider session into a read-only FUSE file
 // system. It contains no provider-specific business logic.

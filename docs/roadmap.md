@@ -13,7 +13,7 @@ The ordering is based on validating core contracts before multiplying surfaces a
 
 ## Next: productionize the read path
 
-- Run native FUSE acceptance on Linux and a macFUSE-enabled macOS machine.
+- Run native FUSE acceptance on Linux and FSKit mount acceptance on macOS.
 - Add bounded disk cache keyed by account, object ID, version, and range.
 - Add session persistence in an owner-only store with atomic refresh-token rotation.
 - Add account selection and a multi-account virtual root.
@@ -30,6 +30,7 @@ The ordering is based on validating core contracts before multiplying surfaces a
 
 ## Platform coverage
 
+- Add an NFS bridge as a macFUSE-free fallback.
 - Add a WinFsp adapter through cgofuse with native Windows mount tests.
 - Add a background service or tray supervisor for each desktop platform.
 - Add authenticated local GUI and native host adapters.

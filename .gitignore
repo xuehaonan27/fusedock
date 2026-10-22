@@ -4,3 +4,7 @@
 *.test
 *.out
 .DS_Store
+/macos/build/
+/macos/FSKit/build/
+/macos/FSKit/DerivedData/
+*.credentials

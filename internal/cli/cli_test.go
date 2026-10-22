@@ -55,6 +55,38 @@ func TestLSJSONForLocalProvider(t *testing.T) {
 	}
 }
 
+func TestCredentialFileCarriesProviderOptions(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "file.txt"), []byte("data"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	config := filepath.Join(t.TempDir(), "local.credentials")
+	if err := os.WriteFile(config, []byte("provider=local\nroot="+root+"\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	registry, err := providers.Builtin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var stdout, stderr bytes.Buffer
+	code := Run(context.Background(), []string{
+		"ls", "local", "--json", "--credential-file", config,
+	}, IO{Out: &stdout, Err: &stderr, Registry: registry})
+	if code != 0 {
+		t.Fatalf("exit=%d stderr=%s", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "file.txt") {
+		t.Fatalf("unexpected listing: %s", stdout.String())
+	}
+}
+
+func TestCredentialFileRejectsWrongProvider(t *testing.T) {
+	descriptor := provider.Descriptor{ID: "local"}
+	if err := mergeCredentialFile(descriptor, map[string][]byte{"provider": []byte("pku")}, nil, nil); err == nil {
+		t.Fatal("credential file for another provider was accepted")
+	}
+}
+
 func TestParsePairsRejectsMissingEquals(t *testing.T) {
 	if _, err := parsePairs([]string{"root"}); err == nil {
 		t.Fatal("invalid option was accepted")

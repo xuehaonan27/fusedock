@@ -2,7 +2,7 @@
 
 FuseDock turns cloud storage into local file systems through a provider-neutral core. A provider implements a small read contract once; the same provider can then serve CLI inspection, FUSE mounts, and future WinFsp, GUI, and mobile surfaces.
 
-The repository currently contains the first vertical slice: a read-only Linux/macOS FUSE driver, a local-directory reference provider, and a PKU NetDisk provider for IAAA and AnyShare. Sessions are opened for one run and are not persisted yet.
+The repository currently contains the first vertical slice: a read-only Linux FUSE driver, a native macOS FSKit extension, a local-directory reference provider, and a PKU NetDisk provider for IAAA and AnyShare. Sessions are opened for one run and are not persisted yet.
 
 ## Current status
 
@@ -12,7 +12,7 @@ The repository currently contains the first vertical slice: a read-only Linux/ma
 | Local provider | Implemented and tested |
 | PKU NetDisk | Implemented for read-only IAAA login, namespace traversal, and range reads |
 | Linux FUSE | Implemented with go-fuse; build tested, native mount requires the FUSE 3 package |
-| macOS FUSE | Implemented with go-fuse; native mount requires macFUSE with its kernel extension enabled |
+| macOS FSKit | Implemented as a native user-space extension; no macFUSE or kernel extension |
 | Windows | CLI and provider layer build; WinFsp mount adapter is next |
 | Baidu NetDisk, Google Drive | Not implemented yet; both fit the same provider contract |
 | Writable mounts | Not implemented; the capability and conflict model is defined in the architecture |
@@ -29,7 +29,7 @@ go build -o bin/fusedock ./cmd/fusedock
 bin/fusedock providers
 ```
 
-Expose a local directory through the same provider and FUSE path used by remote providers:
+On Linux, expose a local directory through the same provider and FUSE path used by remote providers:
 
 ```sh
 mkdir -p /tmp/fusedock-local
@@ -42,7 +42,7 @@ In another terminal:
 ls /tmp/fusedock-local
 ```
 
-Press Ctrl-C in the mount terminal to unmount. On Linux, the FUSE 3 package must provide `/dev/fuse` and `fusermount3`. On macOS, install macFUSE and enable its kernel extension.
+Press Ctrl-C in the mount terminal to unmount. The Linux FUSE 3 package must provide `/dev/fuse` and `fusermount3`.
 
 Inspect provider contents without mounting:
 
@@ -53,7 +53,7 @@ bin/fusedock ls local --option root="$HOME/Documents" --json
 
 ## Mount PKU NetDisk
 
-The PKU provider signs in through IAAA and exposes the account's accessible AnyShare document libraries at the mount root. It does not save the password or session in this version.
+The PKU provider signs in through IAAA and exposes the account's accessible AnyShare document libraries at the mount root. It does not persist a session; the credential file remains under your control.
 
 Interactive password entry:
 
@@ -62,7 +62,14 @@ mkdir -p /tmp/fusedock-pku
 bin/fusedock mount pku /tmp/fusedock-pku --username YOUR-CAMPUS-ID
 ```
 
-For a non-interactive launch, pass a credential from an environment variable:
+For repeatable local use, create an owner-only credential file with the helper script. The password prompt stays out of shell history:
+
+```sh
+./scripts/setup-pku-credentials.sh
+bin/fusedock ls pku --credential-file "$HOME/.config/fusedock/pku.credentials"
+```
+
+The same file works with the macOS FSKit extension. Alternatively, pass a credential from an environment variable:
 
 ```sh
 export FUSEDOCK_PKU_PASSWORD='your-password'
@@ -94,9 +101,9 @@ Cloud providers disagree on object identity, modification versions, pagination, 
 The request path is:
 
 ```text
-FUSE / WinFsp / GUI / CLI
-          |
-      vfs cache
+Linux FUSE / macOS FSKit / WinFsp / GUI / CLI
+                 |
+             vfs cache
           |
    provider.Session
           |
@@ -116,7 +123,31 @@ fusedock mount [flags] <provider> <mountpoint>
 fusedock version
 ```
 
-Provider-specific configuration uses repeatable `--option key=value`. Credentials use `--credential key=value` or `--credential-env key=ENV`. Secrets are held in memory only and are cleared after the provider opens.
+Provider-specific configuration uses repeatable `--option key=value`. Credentials use `--credential-file PATH`, `--credential key=value`, or `--credential-env key=ENV`. Credential files must be regular files owned by the current user with no group or world permissions. Secrets are cleared from the in-memory map after the provider opens.
+
+## macOS FSKit
+
+FuseDock uses Apple's native FSKit extension on macOS, with no macFUSE or kernel extension. The Swift extension owns the FSKit object model; a Go `c-archive` provides the same provider and VFS core used by Linux and the CLI.
+
+```sh
+DEVELOPMENT_TEAM=YOUR_TEAM_ID make macos-fskit
+mkdir -p "$HOME/Applications"
+ditto macos/FSKit/DerivedData/Build/Products/Debug/FuseDock.app \
+  "$HOME/Applications/FuseDock.app"
+open "$HOME/Applications/FuseDock.app"
+```
+
+Enable FuseDock under **System Settings → General → Login Items & Extensions → File System Extensions**, then mount:
+
+```sh
+mkdir -p "$HOME/FuseDockPKU"
+mount -t fusedock \
+  "$HOME/.config/fusedock/pku.credentials" \
+  "$HOME/FuseDockPKU"
+umount "$HOME/FuseDockPKU"
+```
+
+See the [macOS FSKit guide](docs/macos-fskit.md) for the signed build, security-scoped credential handoff, and current limitations.
 
 ## Development
 
@@ -126,7 +157,7 @@ make check
 make build
 ```
 
-`make check` runs formatting checks, `go vet`, the race-enabled test suite, and cross-compiles Linux, macOS, and Windows binaries. New providers can use `pkg/providertest` for shared namespace and range-read conformance checks. Native FUSE mount tests are separate because they require a filesystem driver and a real mount point.
+`make check` runs formatting checks, `go vet`, the race-enabled test suite, and cross-compiles Linux, macOS, and Windows binaries. New providers can use `pkg/providertest` for shared namespace and range-read conformance checks. Native FUSE and FSKit mount tests are separate because they require a filesystem driver, signing, and a real mount point.
 
 On a FUSE-enabled Linux host, `make test-fuse` mounts a local fixture and reads it through the real driver. On any network-enabled machine, `make test-live-pku` checks the public PKU login page without credentials.
 

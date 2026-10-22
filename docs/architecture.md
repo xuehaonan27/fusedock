@@ -25,7 +25,10 @@ The current packages are:
 | `internal/providers/local` | Local directory reference implementation confined by `os.Root` |
 | `internal/providers/pku` | IAAA authentication and AnyShare namespace/range adapter |
 | `internal/vfs` | Metadata cache and per-handle block read cache |
-| `internal/fusefs` | Read-only FUSE adapter for Linux and macOS |
+| `internal/fusefs` | Read-only Linux FUSE adapter; explicit FSKit guidance on macOS |
+| `internal/credentials` | Owner-only credential/configuration file parser |
+| `macos/FSKit` | Swift FSKit app extension and Xcode project |
+| `macos/bridge` | C ABI and Go `c-archive` for the FSKit extension |
 | `internal/cli` | Provider discovery, inspection, and mount orchestration |
 
 ## Provider invariants
@@ -86,11 +89,11 @@ Cross-account or cross-provider rename is `EXDEV`; copying followed by deletion 
 | Target | Filesystem | Notes |
 | --- | --- | --- |
 | Linux | go-fuse | Requires `/dev/fuse` and FUSE 3 tools |
-| macOS | go-fuse + macFUSE | Kernel extension must be enabled; FSKit is not used yet |
+| macOS | Native FSKit app extension | User-space Swift adapter linked to the Go `c-archive`; no macFUSE or kernel extension |
 | Windows | WinFsp through cgofuse | Planned adapter; provider and CLI already cross-build |
 | Android/iOS | No mount | Reuse provider, VFS, and application services behind a native host |
 
-FUSE is not the product boundary. The provider and VFS layers remain usable by a WinFsp adapter and by a mobile GUI that browses and transfers files without mounting.
+FUSE is not the product boundary. The provider and VFS layers remain usable by the native FSKit and planned WinFsp adapters and by a mobile GUI that browses and transfers files without mounting.
 
 ## Provider distribution
 
