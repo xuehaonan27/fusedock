@@ -136,6 +136,8 @@ open "$HOME/Applications/FuseDock.app"
 
 `macos-install` also unregisters stale FSKit extensions created by Xcode's temporary build directories, so only the installed FuseDock appears under File System Extensions.
 
+If macOS leaves that one toggle unresponsive after several development installs, quit System Settings and rerun `make macos-enable`. It backs up and repairs the per-user FSKit state before restarting the FSKit agent.
+
 Enable FuseDock under **System Settings → General → Login Items & Extensions → File System Extensions**, then mount:
 
 ```sh

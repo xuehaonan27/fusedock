@@ -1,4 +1,4 @@
-.PHONY: build test macos-bridge macos-fskit macos-install test-live-pku test-fuse vet fmt check clean
+.PHONY: build test macos-bridge macos-fskit macos-install macos-enable test-live-pku test-fuse vet fmt check clean
 
 build:
 	mkdir -p bin
@@ -20,6 +20,9 @@ macos-fskit: macos-bridge
 
 macos-install: macos-fskit
 	./scripts/install-macos-fskit.sh
+
+macos-enable:
+	./scripts/enable-macos-fskit-module.sh
 
 test-live-pku:
 	FUSEDOCK_LIVE_PKU=1 go test -count=1 -run '^TestLivePKULoginPage$$' -v ./internal/providers/pku

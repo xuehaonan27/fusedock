@@ -40,6 +40,8 @@ The build phase compiles the Go bridge as a Darwin `c-archive`, signs the applic
 
 In the app, click **Open Login Items & Extensions**, then enable **FuseDock** under **File System Extensions**. The extension can be disabled later from the same panel. This approval is a macOS user-security step and cannot be safely bypassed by the build system.
 
+If the toggle appears unresponsive after repeated local development builds, quit and reopen System Settings first. For a development install, `make macos-enable` repairs stale test module IDs in the user-level FSKit state, backs up the previous state under `~/.config/fusedock`, and restarts `fskit_agent`. Release builds should use the System Settings toggle and should not ship this repair path as a silent installation step.
+
 ## Credential file
 
 Create an owner-only file under the user's configuration directory with the helper script. It prompts locally and keeps the password out of shell history and command-line arguments.
