@@ -15,8 +15,8 @@ The ordering is based on validating core contracts before multiplying surfaces a
 
 - Run native FUSE acceptance on Linux and FSKit mount acceptance on macOS.
 - Add bounded disk cache keyed by account, object ID, version, and range.
-- Add session persistence in an owner-only store with atomic refresh-token rotation.
-- Add account selection and a multi-account virtual root.
+- Add a sandbox-safe local account broker for FSKit session access.
+- Add a multi-account virtual root.
 - Add mount supervision and clean diagnostics for stale sessions.
 - Add opt-in PKU live acceptance with a dedicated test account.
 

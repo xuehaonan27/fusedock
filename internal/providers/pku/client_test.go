@@ -133,13 +133,58 @@ func TestSafeTransportErrorDropsSignedURL(t *testing.T) {
 	}
 }
 
+func TestRestoreRefreshesAndPersistsState(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/anyshare/oauth2/login/refreshToken" {
+			http.NotFound(w, r)
+			return
+		}
+		http.SetCookie(w, &http.Cookie{Name: "client.oauth2_token", Value: "new-access", Path: "/"})
+		http.SetCookie(w, &http.Cookie{Name: "client.oauth2_refresh_token", Value: "new-refresh", Path: "/"})
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	var saved State
+	auth, err := newAuthSession(server.URL, server.URL, func(_ context.Context, state State) error {
+		saved = state
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer auth.Close()
+	if err := auth.Restore(context.Background(), State{AccessToken: "old-access", RefreshToken: "old-refresh"}); err != nil {
+		t.Fatal(err)
+	}
+	if auth.AccessToken() != "new-access" || saved.AccessToken != "new-access" || saved.RefreshToken != "new-refresh" {
+		t.Fatalf("token=%q saved=%+v", auth.AccessToken(), saved)
+	}
+}
+
+func TestRestoreRejectsExpiredState(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "expired", http.StatusUnauthorized)
+	}))
+	defer server.Close()
+	auth, err := newAuthSession(server.URL, server.URL, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer auth.Close()
+	err = auth.Restore(context.Background(), State{AccessToken: "old-access", RefreshToken: "old-refresh"})
+	if !errors.Is(err, ErrStateExpired) {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
 func TestLivePKULoginPage(t *testing.T) {
 	if os.Getenv("FUSEDOCK_LIVE_PKU") != "1" {
 		t.Skip("set FUSEDOCK_LIVE_PKU=1 to check the public PKU login page")
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
-	auth, err := newAuthSession(defaultEndpoint, defaultIAAA)
+	auth, err := newAuthSession(defaultEndpoint, defaultIAAA, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

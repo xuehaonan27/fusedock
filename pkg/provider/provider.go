@@ -113,6 +113,13 @@ type OpenRequest struct {
 	Secrets  map[string][]byte
 	Options  map[string]string
 	Prompt   PromptFunc
+	// State is opaque provider session state previously returned through
+	// SaveState. Providers must treat it as untrusted and bind it to their
+	// configured endpoint and account before restoring credentials.
+	State []byte
+	// SaveState asks the account service to persist refreshed state. Providers
+	// that do not support restore should leave State empty and ignore this.
+	SaveState func(context.Context, []byte) error
 }
 
 // Factory creates one provider session. A registry owns factories; a Session

@@ -93,6 +93,10 @@ func fusedock_open(configPath *C.char, errorOut **C.char) *C.FuseDockHandle {
 		}
 	}
 	defer clearValues(secrets)
+	if accountName := strings.TrimSpace(string(values["account"])); accountName != "" {
+		setError(errorOut, fmt.Errorf("account-backed FSKit mounts require the FuseDock account broker (not implemented); use a credential file for account %q", accountName))
+		return nil
+	}
 	ctx, cancel := context.WithCancel(context.Background())
 	session, err := factory.Open(ctx, provider.OpenRequest{Options: options, Secrets: secrets})
 	if err != nil {

@@ -2,6 +2,7 @@ package pku
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -10,6 +11,15 @@ import (
 )
 
 const rootID = "pku://root"
+
+type savedSession struct {
+	Version      int    `json:"version"`
+	Endpoint     string `json:"endpoint"`
+	IAAA         string `json:"iaaa_endpoint"`
+	Username     string `json:"username"`
+	AccessToken  string `json:"access_token"`
+	RefreshToken string `json:"refresh_token"`
+}
 
 type Factory struct{}
 
@@ -41,30 +51,70 @@ func (Factory) Open(ctx context.Context, req provider.OpenRequest) (provider.Ses
 	if username == "" {
 		return nil, errors.New("PKU username is required (--username or --credential username=VALUE)")
 	}
-	password := req.Secrets["password"]
-	if len(password) == 0 && req.Prompt != nil {
-		value, err := req.Prompt(ctx, provider.Prompt{Kind: provider.PromptPassword, Message: "PKU password", Secret: true})
-		if err != nil {
-			return nil, err
-		}
-		password = []byte(value)
-	}
-	if len(password) == 0 {
-		return nil, errors.New("PKU password is required; use --credential-env password=ENV or run interactively")
-	}
-	defer clear(password)
-
 	endpoint := strings.TrimSpace(req.Options["endpoint"])
 	if endpoint == "" {
 		endpoint = defaultEndpoint
 	}
-	auth, err := newAuthSession(endpoint, req.Options["iaaa_endpoint"])
+	iaaaEndpoint := strings.TrimSpace(req.Options["iaaa_endpoint"])
+	if iaaaEndpoint == "" {
+		iaaaEndpoint = defaultIAAA
+	}
+	var save func(context.Context, State) error
+	if req.SaveState != nil {
+		save = func(ctx context.Context, state State) error {
+			data, err := json.Marshal(savedSession{
+				Version: 1, Endpoint: strings.TrimRight(endpoint, "/"), IAAA: strings.TrimRight(iaaaEndpoint, "/"),
+				Username: username, AccessToken: state.AccessToken, RefreshToken: state.RefreshToken,
+			})
+			if err != nil {
+				return err
+			}
+			defer clear(data)
+			return req.SaveState(ctx, data)
+		}
+	}
+	auth, err := newAuthSession(endpoint, iaaaEndpoint, save)
 	if err != nil {
 		return nil, err
 	}
-	if err := auth.Login(ctx, username, password, req.Prompt); err != nil {
-		auth.Close()
-		return nil, err
+	restored := false
+	if len(req.State) > 0 {
+		var state savedSession
+		if err := json.Unmarshal(req.State, &state); err != nil || state.Version != 1 {
+			auth.Close()
+			return nil, errors.New("saved PKU session is invalid")
+		}
+		if state.Endpoint != strings.TrimRight(endpoint, "/") || state.IAAA != strings.TrimRight(iaaaEndpoint, "/") || state.Username != username {
+			auth.Close()
+			return nil, errors.New("saved PKU session belongs to a different endpoint or account")
+		}
+		err := auth.Restore(ctx, State{AccessToken: state.AccessToken, RefreshToken: state.RefreshToken})
+		if err == nil {
+			restored = true
+		} else if !errors.Is(err, ErrStateExpired) {
+			auth.Close()
+			return nil, err
+		}
+	}
+	if !restored {
+		password := req.Secrets["password"]
+		if len(password) == 0 && req.Prompt != nil {
+			value, err := req.Prompt(ctx, provider.Prompt{Kind: provider.PromptPassword, Message: "PKU password", Secret: true})
+			if err != nil {
+				auth.Close()
+				return nil, err
+			}
+			password = []byte(value)
+		}
+		if len(password) == 0 {
+			auth.Close()
+			return nil, errors.New("PKU password is required because no renewable saved session is available")
+		}
+		defer clear(password)
+		if err := auth.Login(ctx, username, password, req.Prompt); err != nil {
+			auth.Close()
+			return nil, err
+		}
 	}
 	client, err := newAnyShareClient(endpoint, auth)
 	if err != nil {

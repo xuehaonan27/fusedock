@@ -34,14 +34,34 @@ const (
 )
 
 type authSession struct {
-	mu     sync.Mutex
-	base   *url.URL
-	iaaa   *url.URL
-	client *http.Client
-	token  string
+	mu      sync.Mutex
+	base    *url.URL
+	iaaa    *url.URL
+	client  *http.Client
+	token   string
+	onState func(context.Context, State) error
 }
 
-func newAuthSession(endpoint, iaaaEndpoint string) (*authSession, error) {
+// State contains renewable AnyShare cookies. Callers must store it in a
+// protected credential store and never log or display it.
+type State struct {
+	AccessToken  string `json:"access_token,omitempty"`
+	RefreshToken string `json:"refresh_token,omitempty"`
+}
+
+var ErrStateExpired = errors.New("PKU saved session expired")
+
+type httpStatusError struct {
+	Status int
+	Method string
+	Path   string
+}
+
+func (e *httpStatusError) Error() string {
+	return fmt.Sprintf("authentication %s %s: HTTP %d", e.Method, e.Path, e.Status)
+}
+
+func newAuthSession(endpoint, iaaaEndpoint string, onState func(context.Context, State) error) (*authSession, error) {
 	if endpoint == "" {
 		endpoint = defaultEndpoint
 	}
@@ -57,7 +77,7 @@ func newAuthSession(endpoint, iaaaEndpoint string) (*authSession, error) {
 		return nil, fmt.Errorf("PKU IAAA endpoint: %w", err)
 	}
 	jar, _ := cookiejar.New(nil)
-	a := &authSession{base: base, iaaa: iaaa}
+	a := &authSession{base: base, iaaa: iaaa, onState: onState}
 	transport := http.DefaultTransport.(*http.Transport).Clone()
 	a.client = &http.Client{
 		Transport: transport,
@@ -145,7 +165,7 @@ func (a *authSession) request(ctx context.Context, method, raw, contentType stri
 		return nil, nil, err
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return nil, nil, fmt.Errorf("authentication %s %s: HTTP %d", method, req.URL.Path, resp.StatusCode)
+		return nil, nil, &httpStatusError{Status: resp.StatusCode, Method: method, Path: req.URL.Path}
 	}
 	return b, resp.Request.URL, nil
 }
@@ -234,7 +254,7 @@ func (a *authSession) Login(ctx context.Context, username string, password []byt
 	if err := a.updateToken(); err != nil {
 		return err
 	}
-	return nil
+	return a.persist(ctx)
 }
 
 func parsePublicKey(raw string) (*rsa.PublicKey, error) {
@@ -457,20 +477,87 @@ func (a *authSession) updateToken() error {
 	return errors.New("login did not issue an AnyShare access token")
 }
 
+func (a *authSession) stateLocked() State {
+	state := State{}
+	for _, path := range []string{"/", "/oauth2/", "/anyshare/"} {
+		u, _ := a.base.Parse(path)
+		for _, cookie := range a.client.Jar.Cookies(u) {
+			if cookie.Name == "client.oauth2_token" && state.AccessToken == "" {
+				state.AccessToken = cookie.Value
+			}
+			if cookie.Name == "client.oauth2_refresh_token" {
+				state.RefreshToken = cookie.Value
+			}
+		}
+	}
+	if state.AccessToken == "" {
+		state.AccessToken = a.token
+	}
+	return state
+}
+
+func (a *authSession) persist(ctx context.Context) error {
+	if a.onState == nil {
+		return nil
+	}
+	if err := a.onState(ctx, a.stateLocked()); err != nil {
+		return fmt.Errorf("persist PKU session: %w", err)
+	}
+	return nil
+}
+
+// Restore applies a saved session and validates its renewable token. A rejected
+// refresh token returns ErrStateExpired so the caller can fall back to password
+// login; transport failures remain distinct.
+func (a *authSession) Restore(ctx context.Context, state State) error {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if state.RefreshToken == "" || state.AccessToken == "" {
+		return ErrStateExpired
+	}
+	cookies := []*http.Cookie{
+		{Name: "client.oauth2_token", Value: state.AccessToken, Path: "/", Secure: a.base.Scheme == "https", HttpOnly: true},
+		{Name: "client.oauth2_refresh_token", Value: state.RefreshToken, Path: "/", Secure: a.base.Scheme == "https", HttpOnly: true},
+	}
+	for _, cookie := range cookies {
+		if err := cookie.Valid(); err != nil {
+			return ErrStateExpired
+		}
+	}
+	a.client.Jar.SetCookies(a.base, cookies)
+	a.token = ""
+	if err := a.updateToken(); err != nil {
+		return ErrStateExpired
+	}
+	rejected := a.token
+	if err := a.refreshLocked(ctx, rejected); err != nil {
+		return err
+	}
+	return nil
+}
+
 func (a *authSession) Refresh(ctx context.Context, rejected string) error {
 	a.mu.Lock()
 	defer a.mu.Unlock()
+	return a.refreshLocked(ctx, rejected)
+}
+
+func (a *authSession) refreshLocked(ctx context.Context, rejected string) error {
 	if a.token != "" && a.token != rejected {
 		return nil
 	}
 	if _, _, err := a.get(ctx, a.base.String()+"/anyshare/oauth2/login/refreshToken?isforced=true"); err != nil {
+		var status *httpStatusError
+		if errors.As(err, &status) && (status.Status == http.StatusBadRequest || status.Status == http.StatusUnauthorized || status.Status == http.StatusForbidden) {
+			return fmt.Errorf("%w: %v", ErrStateExpired, err)
+		}
 		return fmt.Errorf("refresh PKU session: %w", err)
 	}
 	if err := a.updateToken(); err != nil {
 		return fmt.Errorf("refresh PKU session: %w", err)
 	}
 	if a.token == rejected {
-		return errors.New("PKU session refresh did not issue a new access token")
+		return fmt.Errorf("%w: refresh did not issue a new access token", ErrStateExpired)
 	}
-	return nil
+	return a.persist(ctx)
 }

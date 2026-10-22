@@ -9,9 +9,35 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/zalando/go-keyring"
+
+	"github.com/xuehaonan/fusedock/internal/accounts"
 	"github.com/xuehaonan/fusedock/internal/providers"
 	"github.com/xuehaonan/fusedock/pkg/provider"
 )
+
+type testSecrets map[string]string
+
+func (m testSecrets) Get(service, user string) (string, error) {
+	value, ok := m[service+"/"+user]
+	if !ok {
+		return "", keyring.ErrNotFound
+	}
+	return value, nil
+}
+func (m testSecrets) Set(service, user, secret string) error {
+	m[service+"/"+user] = secret
+	return nil
+}
+func (m testSecrets) Delete(service, user string) error {
+	delete(m, service+"/"+user)
+	return nil
+}
+
+func testAccountStore(t *testing.T) *accounts.Store {
+	t.Helper()
+	return &accounts.Store{Path: filepath.Join(t.TempDir(), "fusedock", "accounts.json"), Secrets: testSecrets{}}
+}
 
 func TestProvidersCommand(t *testing.T) {
 	registry, err := providers.Builtin()
@@ -128,3 +154,84 @@ func TestSubcommandHelpExitsSuccessfully(t *testing.T) {
 		}
 	}
 }
+
+func TestAccountAddAndUse(t *testing.T) {
+	store := testAccountStore(t)
+	registry := provider.NewRegistry()
+	factory := &fixtureFactory{}
+	if err := registry.Register(factory); err != nil {
+		t.Fatal(err)
+	}
+	config := filepath.Join(t.TempDir(), "fake.credentials")
+	if err := os.WriteFile(config, []byte("provider=fake\nusername=fixture\npassword=secret\nendpoint=https://example.test\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	var stdout, stderr bytes.Buffer
+	code := Run(context.Background(), []string{
+		"account", "add", "--credential-file", config, "--name", "fixture", "--default",
+	}, IO{Out: &stdout, Err: &stderr, Registry: registry, Accounts: store})
+	if code != 0 {
+		t.Fatalf("add exit=%d stderr=%s", code, stderr.String())
+	}
+	stdout.Reset()
+	stderr.Reset()
+	code = Run(context.Background(), []string{"ls", "--account", "fixture", "--json"}, IO{
+		Out: &stdout, Err: &stderr, Registry: registry, Accounts: store,
+	})
+	if code != 0 {
+		t.Fatalf("ls exit=%d stderr=%s", code, stderr.String())
+	}
+	if factory.username != "fixture" || factory.password != "secret" || factory.endpoint != "https://example.test" {
+		t.Fatalf("unexpected open request: user=%q password=%q endpoint=%q", factory.username, factory.password, factory.endpoint)
+	}
+	stdout.Reset()
+	stderr.Reset()
+	code = Run(context.Background(), []string{"account", "ls", "--json"}, IO{
+		Out: &stdout, Err: &stderr, Registry: registry, Accounts: store,
+	})
+	if code != 0 {
+		t.Fatalf("account ls exit=%d stderr=%s", code, stderr.String())
+	}
+	if strings.Contains(stdout.String(), "secret") || strings.Contains(stdout.String(), "password") {
+		t.Fatalf("account listing exposed secret material: %s", stdout.String())
+	}
+}
+
+type fixtureFactory struct {
+	username string
+	password string
+	endpoint string
+}
+
+func (*fixtureFactory) Descriptor() provider.Descriptor {
+	return provider.Descriptor{
+		ContractVersion: provider.ContractVersion, ID: "fake", Name: "Fixture", Capabilities: provider.CapRead,
+		Options: []provider.OptionSpec{{Key: "endpoint", Description: "endpoint"}},
+		Credentials: []provider.CredentialSpec{
+			{Key: "username", Description: "username"},
+			{Key: "password", Description: "password", Secret: true},
+		},
+	}
+}
+func (f *fixtureFactory) Open(_ context.Context, request provider.OpenRequest) (provider.Session, error) {
+	f.username = request.Username
+	f.password = string(request.Secrets["password"])
+	f.endpoint = request.Options["endpoint"]
+	return fixtureSession{}, nil
+}
+
+type fixtureSession struct{}
+
+func (fixtureSession) Root(context.Context) (provider.Object, error) {
+	return provider.Object{ID: "root", Name: "root", Kind: provider.KindDirectory}, nil
+}
+func (fixtureSession) Stat(context.Context, provider.Object) (provider.Object, error) {
+	return provider.Object{}, nil
+}
+func (fixtureSession) List(context.Context, provider.Object) ([]provider.Object, error) {
+	return []provider.Object{{ID: "file", ParentID: "root", Name: "file", Kind: provider.KindFile, Size: 1}}, nil
+}
+func (fixtureSession) OpenRead(context.Context, provider.Object) (provider.Reader, error) {
+	return nil, provider.ErrUnsupported
+}
+func (fixtureSession) Close() error { return nil }

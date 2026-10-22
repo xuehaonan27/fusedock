@@ -81,7 +81,7 @@ ls "$HOME/FuseDockPKU"
 umount "$HOME/FuseDockPKU"
 ```
 
-The mount is read-only. Writes return `EROFS`. Single-factor accounts open directly; if IAAA requires CAPTCHA or OTP while the FSKit extension has no prompt UI, the mount reports the verification error and the user must complete an interactive provider login path before retrying. A future account service will persist the renewable session inside an app-group container and handle prompts through the app.
+The mount is read-only. Writes return `EROFS`. Single-factor accounts open directly; if IAAA requires CAPTCHA or OTP while the FSKit extension has no prompt UI, the mount reports the verification error and the user must complete an interactive provider login path before retrying. The CLI account store keeps its password and renewable session in the system credential store, but the sandboxed FSKit extension cannot read them without user interaction. A future authenticated local account broker will provide that boundary and handle prompts through the app.
 
 ## Why not macFUSE or File Provider
 
@@ -93,6 +93,6 @@ The NFS bridge remains a future fallback for systems where FSKit or extension de
 
 - The FSKit extension is read-only.
 - CAPTCHA/OTP prompts are not yet connected to the host application.
-- Session persistence and account management inside the app are pending.
+- The FSKit extension's account-broker integration is pending; it currently requires the owner-only source credential file.
 - The extension requires local signing and the one-time Filesystem Extension toggle.
 - The current implementation is a development build; distribution needs an app bundle, notarization, and a release workflow.

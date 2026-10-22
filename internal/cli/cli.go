@@ -16,6 +16,7 @@ import (
 	"github.com/spf13/pflag"
 	"golang.org/x/term"
 
+	"github.com/xuehaonan/fusedock/internal/accounts"
 	"github.com/xuehaonan/fusedock/internal/credentials"
 	"github.com/xuehaonan/fusedock/internal/fusefs"
 	"github.com/xuehaonan/fusedock/internal/providers"
@@ -30,6 +31,7 @@ type IO struct {
 	Out      io.Writer
 	Err      io.Writer
 	Registry *provider.Registry
+	Accounts *accounts.Store
 }
 
 func Run(ctx context.Context, args []string, streams IO) int {
@@ -63,6 +65,8 @@ func Run(ctx context.Context, args []string, streams IO) int {
 		return 0
 	case "providers":
 		return runProviders(args[1:], streams)
+	case "account":
+		return runAccount(ctx, args[1:], streams)
 	case "ls":
 		return runLS(ctx, args[1:], streams)
 	case "mount":
@@ -79,13 +83,17 @@ func printUsage(out io.Writer) {
 
 Usage:
   fusedock providers
-  fusedock ls [flags] <provider>
-  fusedock mount [flags] <provider> <mountpoint>
+  fusedock account add [flags]
+  fusedock account ls [--json]
+  fusedock account default <name>
+  fusedock account remove <name>
+  fusedock ls [flags] [provider]
+  fusedock mount [flags] [provider] <mountpoint>
   fusedock version
 
-Provider configuration is expressed with --option key=value. Credentials are
-passed with --credential, --credential-env, or an interactive prompt; they are
-never written by this initial version.
+Saved accounts keep their password and renewable provider state in the system
+credential store. One-off commands can instead pass --credential-file,
+--credential-env, or an interactive prompt.
 
 Run 'fusedock providers' for provider IDs and their options.
 `)
@@ -97,6 +105,8 @@ type providerFlags struct {
 	credentialEnv  []string
 	credentialFile string
 	username       string
+	account        string
+	accountStore   *accounts.Store
 }
 
 func (f *providerFlags) bind(flags *pflag.FlagSet) {
@@ -105,9 +115,13 @@ func (f *providerFlags) bind(flags *pflag.FlagSet) {
 	flags.StringArrayVar(&f.credentialEnv, "credential-env", nil, "read credential from environment, key=ENV (repeatable)")
 	flags.StringVar(&f.credentialFile, "credential-file", "", "read credentials from an owner-only key=value file")
 	flags.StringVar(&f.username, "username", "", "shortcut for --credential username=VALUE")
+	flags.StringVar(&f.account, "account", "", "use a saved account")
 }
 
 func (f *providerFlags) open(ctx context.Context, factory provider.Factory, prompt provider.PromptFunc) (provider.Session, error) {
+	if f.account != "" {
+		return f.openAccount(ctx, factory, prompt)
+	}
 	options, err := parsePairs(f.options)
 	if err != nil {
 		return nil, fmt.Errorf("invalid provider option: %w", err)
@@ -132,6 +146,91 @@ func (f *providerFlags) open(ctx context.Context, factory provider.Factory, prom
 	}
 	request := provider.OpenRequest{Username: f.username, Secrets: secrets, Options: options, Prompt: prompt}
 	return factory.Open(ctx, request)
+}
+
+func (f *providerFlags) openAccount(ctx context.Context, factory provider.Factory, prompt provider.PromptFunc) (provider.Session, error) {
+	if f.credentialFile != "" || len(f.credentials) > 0 || len(f.credentialEnv) > 0 || f.username != "" {
+		return nil, errors.New("--account cannot be combined with explicit credentials")
+	}
+	store := f.accountStore
+	if store == nil {
+		var err error
+		store, err = accounts.Default()
+		if err != nil {
+			return nil, err
+		}
+	}
+	account, storedSecrets, state, err := store.Credentials(ctx, f.account)
+	if err != nil {
+		return nil, err
+	}
+	defer clearSecrets(storedSecrets)
+	defer clear(state)
+	descriptor := factory.Descriptor()
+	if account.Provider != descriptor.ID {
+		return nil, fmt.Errorf("account %q belongs to provider %s, not %s", account.Name, account.Provider, descriptor.ID)
+	}
+	options := cloneStringMap(account.Options)
+	overrides, err := parsePairs(f.options)
+	if err != nil {
+		return nil, fmt.Errorf("invalid provider option: %w", err)
+	}
+	for key, value := range overrides {
+		options[key] = value
+	}
+	if err := validateInputs(descriptor, options, storedSecrets, account.Username); err != nil {
+		return nil, err
+	}
+	request := provider.OpenRequest{
+		Username: account.Username, Secrets: storedSecrets, Options: options, State: state, Prompt: prompt,
+		SaveState: func(ctx context.Context, data []byte) error {
+			return store.SaveState(ctx, account.Name, account.Provider, account.Username, data)
+		},
+	}
+	return factory.Open(ctx, request)
+}
+
+func cloneStringMap(input map[string]string) map[string]string {
+	result := make(map[string]string, len(input))
+	for key, value := range input {
+		result[key] = value
+	}
+	return result
+}
+
+func accountStore(streams IO) (*accounts.Store, error) {
+	if streams.Accounts != nil {
+		return streams.Accounts, nil
+	}
+	return accounts.Default()
+}
+
+func resolveProviderID(ctx context.Context, streams IO, accountName string, args []string) (string, error) {
+	if accountName == "" {
+		if len(args) != 1 {
+			return "", errors.New("provider is required")
+		}
+		return args[0], nil
+	}
+	if len(args) > 1 {
+		return "", errors.New("too many provider arguments")
+	}
+	store, err := accountStore(streams)
+	if err != nil {
+		return "", err
+	}
+	config, err := store.Load(ctx)
+	if err != nil {
+		return "", err
+	}
+	account, ok := config.Find(accountName)
+	if !ok {
+		return "", fmt.Errorf("%w: %s", accounts.ErrNotFound, accountName)
+	}
+	if len(args) == 1 && args[0] != account.Provider {
+		return "", fmt.Errorf("account %q belongs to provider %s, not %s", accountName, account.Provider, args[0])
+	}
+	return account.Provider, nil
 }
 
 func mergeCredentialFile(descriptor provider.Descriptor, fileValues map[string][]byte, options map[string]string, secrets map[string][]byte) error {
@@ -346,6 +445,215 @@ func runProviders(args []string, streams IO) int {
 	return 0
 }
 
+func runAccount(ctx context.Context, args []string, streams IO) int {
+	if len(args) == 0 || helpRequested(args) {
+		fmt.Fprintln(streams.Out, "usage: fusedock account <add|ls|default|remove> [flags]")
+		return 0
+	}
+	switch args[0] {
+	case "add":
+		return runAccountAdd(ctx, args[1:], streams)
+	case "ls", "list":
+		return runAccountLS(ctx, args[1:], streams)
+	case "default":
+		return runAccountDefault(ctx, args[1:], streams)
+	case "remove", "rm":
+		return runAccountRemove(ctx, args[1:], streams)
+	default:
+		fmt.Fprintf(streams.Err, "fusedock account: unknown command %q\n", args[0])
+		return 2
+	}
+}
+
+func runAccountAdd(ctx context.Context, args []string, streams IO) int {
+	flags := pflag.NewFlagSet("account add", pflag.ContinueOnError)
+	flags.SetOutput(streams.Err)
+	providerID := flags.String("provider", "", "provider ID")
+	name := flags.String("name", "", "local account name (defaults to username)")
+	username := flags.String("username", "", "provider username")
+	credentialFile := flags.String("credential-file", "", "bootstrap from an owner-only key=value file")
+	makeDefault := flags.Bool("default", false, "make this the default account")
+	replace := flags.Bool("replace", false, "replace an existing account with the same name")
+	var optionValues []string
+	flags.StringArrayVarP(&optionValues, "option", "o", nil, "provider option key=value (repeatable)")
+	flags.Usage = func() {
+		fmt.Fprintln(streams.Out, "usage: fusedock account add --provider ID --username USER [--name NAME] [--credential-file PATH] [--default] [--replace] [-o key=value]")
+	}
+	if helpRequested(args) {
+		flags.Usage()
+		return 0
+	}
+	if err := flags.Parse(args); err != nil {
+		if errors.Is(err, pflag.ErrHelp) {
+			return 0
+		}
+		return 2
+	}
+	if flags.NArg() != 0 {
+		fmt.Fprintln(streams.Err, "fusedock account add: unexpected arguments")
+		return 2
+	}
+	options, err := parsePairs(optionValues)
+	if err != nil {
+		fmt.Fprintln(streams.Err, "fusedock:", err)
+		return 2
+	}
+	secrets := make(map[string][]byte)
+	defer clearSecrets(secrets)
+	if *credentialFile != "" {
+		values, err := credentials.Read(*credentialFile)
+		if err != nil {
+			fmt.Fprintln(streams.Err, "fusedock:", err)
+			return 1
+		}
+		defer clearSecrets(values)
+		if *providerID == "" {
+			*providerID = strings.TrimSpace(string(values["provider"]))
+		}
+		if *username == "" {
+			*username = strings.TrimSpace(string(values["username"]))
+		}
+		for key, value := range values {
+			if key == "provider" || key == "username" || key == "password" {
+				continue
+			}
+			if _, exists := options[key]; !exists {
+				options[key] = string(value)
+			}
+		}
+		if value := values["password"]; len(value) > 0 {
+			secrets["password"] = append([]byte(nil), value...)
+		}
+	}
+	if *providerID == "" {
+		fmt.Fprintln(streams.Err, "fusedock: --provider is required")
+		return 2
+	}
+	factory, ok := streams.Registry.Get(*providerID)
+	if !ok {
+		fmt.Fprintf(streams.Err, "fusedock: unknown provider %q\n", *providerID)
+		return 2
+	}
+	if *username == "" {
+		value, err := promptFunc(streams.In, streams.Out, streams.Err)(ctx, provider.Prompt{Kind: "text", Message: "Provider username"})
+		if err != nil {
+			fmt.Fprintln(streams.Err, "fusedock:", err)
+			return 1
+		}
+		*username = value
+	}
+	if len(secrets["password"]) == 0 {
+		value, err := promptFunc(streams.In, streams.Out, streams.Err)(ctx, provider.Prompt{Kind: provider.PromptPassword, Message: "Password", Secret: true})
+		if err != nil {
+			fmt.Fprintln(streams.Err, "fusedock:", err)
+			return 1
+		}
+		secrets["password"] = []byte(value)
+	}
+	if err := validateInputs(factory.Descriptor(), options, secrets, *username); err != nil {
+		fmt.Fprintln(streams.Err, "fusedock:", err)
+		return 2
+	}
+	if *name == "" {
+		*name = *username
+	}
+	store, err := accountStore(streams)
+	if err != nil {
+		fmt.Fprintln(streams.Err, "fusedock:", err)
+		return 1
+	}
+	account := accounts.Account{Name: *name, Provider: *providerID, Username: *username, Options: options}
+	if err := store.Add(ctx, account, secrets, *makeDefault, *replace); err != nil {
+		fmt.Fprintln(streams.Err, "fusedock:", err)
+		return 1
+	}
+	fmt.Fprintf(streams.Out, "Account %s saved for provider %s.\n", account.Name, account.Provider)
+	if *credentialFile != "" {
+		fmt.Fprintf(streams.Out, "The password is now in the system credential store. After checkout succeeds, remove the bootstrap file: %s\n", *credentialFile)
+	}
+	return 0
+}
+
+func runAccountLS(ctx context.Context, args []string, streams IO) int {
+	flags := pflag.NewFlagSet("account ls", pflag.ContinueOnError)
+	flags.SetOutput(streams.Err)
+	jsonOutput := flags.Bool("json", false, "write a JSON document")
+	if err := flags.Parse(args); err != nil {
+		if errors.Is(err, pflag.ErrHelp) {
+			return 0
+		}
+		return 2
+	}
+	if flags.NArg() != 0 {
+		fmt.Fprintln(streams.Err, "fusedock account ls: unexpected arguments")
+		return 2
+	}
+	store, err := accountStore(streams)
+	if err != nil {
+		fmt.Fprintln(streams.Err, "fusedock:", err)
+		return 1
+	}
+	config, err := store.Load(ctx)
+	if err != nil {
+		fmt.Fprintln(streams.Err, "fusedock:", err)
+		return 1
+	}
+	if *jsonOutput {
+		encoder := json.NewEncoder(streams.Out)
+		encoder.SetIndent("", "  ")
+		if err := encoder.Encode(config); err != nil {
+			fmt.Fprintln(streams.Err, "fusedock:", err)
+			return 1
+		}
+		return 0
+	}
+	table := tabwriter.NewWriter(streams.Out, 0, 4, 2, ' ', 0)
+	fmt.Fprintln(table, "DEFAULT\tNAME\tPROVIDER\tUSERNAME")
+	for _, account := range config.Accounts {
+		marker := ""
+		if account.Name == config.Default {
+			marker = "*"
+		}
+		fmt.Fprintf(table, "%s\t%s\t%s\t%s\n", marker, account.Name, account.Provider, account.Username)
+	}
+	_ = table.Flush()
+	return 0
+}
+
+func runAccountDefault(ctx context.Context, args []string, streams IO) int {
+	if len(args) != 1 {
+		fmt.Fprintln(streams.Err, "usage: fusedock account default <name>")
+		return 2
+	}
+	store, err := accountStore(streams)
+	if err == nil {
+		err = store.SetDefault(ctx, args[0])
+	}
+	if err != nil {
+		fmt.Fprintln(streams.Err, "fusedock:", err)
+		return 1
+	}
+	fmt.Fprintf(streams.Out, "Default account: %s\n", args[0])
+	return 0
+}
+
+func runAccountRemove(ctx context.Context, args []string, streams IO) int {
+	if len(args) != 1 {
+		fmt.Fprintln(streams.Err, "usage: fusedock account remove <name>")
+		return 2
+	}
+	store, err := accountStore(streams)
+	if err == nil {
+		err = store.Remove(ctx, args[0])
+	}
+	if err != nil {
+		fmt.Fprintln(streams.Err, "fusedock:", err)
+		return 1
+	}
+	fmt.Fprintf(streams.Out, "Removed account: %s\n", args[0])
+	return 0
+}
+
 func capabilityText(capabilities provider.Capabilities) string {
 	var values []string
 	if capabilities&provider.CapRead != 0 {
@@ -371,11 +679,12 @@ func runLS(ctx context.Context, args []string, streams IO) int {
 	flags.SetOutput(streams.Err)
 	var common providerFlags
 	common.bind(flags)
+	common.accountStore = streams.Accounts
 	path := flags.StringP("path", "p", "/", "provider path to list")
 	jsonOutput := flags.Bool("json", false, "write a JSON array")
 	showAll := flags.BoolP("all", "a", false, "include hidden local entries")
 	flags.Usage = func() {
-		fmt.Fprintln(flags.Output(), "usage: fusedock ls [flags] <provider>")
+		fmt.Fprintln(flags.Output(), "usage: fusedock ls [flags] [provider]")
 		flags.PrintDefaults()
 	}
 	if helpRequested(args) {
@@ -389,13 +698,14 @@ func runLS(ctx context.Context, args []string, streams IO) int {
 		}
 		return 2
 	}
-	if flags.NArg() != 1 {
-		fmt.Fprintln(streams.Err, "usage: fusedock ls [flags] <provider>")
+	providerID, err := resolveProviderID(ctx, streams, common.account, flags.Args())
+	if err != nil {
+		fmt.Fprintln(streams.Err, "fusedock:", err)
 		return 2
 	}
-	factory, ok := streams.Registry.Get(flags.Arg(0))
+	factory, ok := streams.Registry.Get(providerID)
 	if !ok {
-		fmt.Fprintf(streams.Err, "fusedock: unknown provider %q\n", flags.Arg(0))
+		fmt.Fprintf(streams.Err, "fusedock: unknown provider %q\n", providerID)
 		return 2
 	}
 	session, err := common.open(ctx, factory, promptFunc(streams.In, streams.Out, streams.Err))
@@ -456,6 +766,7 @@ func runMount(ctx context.Context, args []string, streams IO) int {
 	flags.SetOutput(streams.Err)
 	var common providerFlags
 	common.bind(flags)
+	common.accountStore = streams.Accounts
 	attrTTL := flags.Duration("attr-ttl", 2*time.Second, "kernel attribute cache duration")
 	entryTTL := flags.Duration("entry-ttl", 2*time.Second, "kernel entry cache duration")
 	cacheTTL := flags.Duration("metadata-cache", 2*time.Second, "provider metadata cache duration")
@@ -463,7 +774,7 @@ func runMount(ctx context.Context, args []string, streams IO) int {
 	volumeName := flags.String("volume-name", "FuseDock", "filesystem display name")
 	readOnly := flags.Bool("read-only", true, "mount read-only (the only mode in this release)")
 	flags.Usage = func() {
-		fmt.Fprintln(flags.Output(), "usage: fusedock mount [flags] <provider> <mountpoint>")
+		fmt.Fprintln(flags.Output(), "usage: fusedock mount [flags] [provider] <mountpoint>")
 		flags.PrintDefaults()
 	}
 	if helpRequested(args) {
@@ -477,9 +788,22 @@ func runMount(ctx context.Context, args []string, streams IO) int {
 		}
 		return 2
 	}
-	if flags.NArg() != 2 {
-		fmt.Fprintln(streams.Err, "usage: fusedock mount [flags] <provider> <mountpoint>")
-		return 2
+	var providerArgs []string
+	var mountpoint string
+	if common.account != "" {
+		if flags.NArg() < 1 || flags.NArg() > 2 {
+			fmt.Fprintln(streams.Err, "usage: fusedock mount [flags] --account NAME [provider] <mountpoint>")
+			return 2
+		}
+		mountpoint = flags.Arg(flags.NArg() - 1)
+		providerArgs = flags.Args()[:flags.NArg()-1]
+	} else {
+		if flags.NArg() != 2 {
+			fmt.Fprintln(streams.Err, "usage: fusedock mount [flags] <provider> <mountpoint>")
+			return 2
+		}
+		providerArgs = flags.Args()[:1]
+		mountpoint = flags.Arg(1)
 	}
 	if !*readOnly {
 		fmt.Fprintln(streams.Err, "fusedock: writable mounts are not implemented; only --read-only=true is supported")
@@ -489,7 +813,11 @@ func runMount(ctx context.Context, args []string, streams IO) int {
 		fmt.Fprintln(streams.Err, "fusedock: TTL values must be positive; metadata cache may be zero")
 		return 2
 	}
-	providerID, mountpoint := flags.Arg(0), flags.Arg(1)
+	providerID, err := resolveProviderID(ctx, streams, common.account, providerArgs)
+	if err != nil {
+		fmt.Fprintln(streams.Err, "fusedock:", err)
+		return 2
+	}
 	factory, ok := streams.Registry.Get(providerID)
 	if !ok {
 		fmt.Fprintf(streams.Err, "fusedock: unknown provider %q\n", providerID)

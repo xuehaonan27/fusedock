@@ -2,7 +2,7 @@
 
 FuseDock turns cloud storage into local file systems through a provider-neutral core. A provider implements a small read contract once; the same provider can then serve CLI inspection, FUSE mounts, and future WinFsp, GUI, and mobile surfaces.
 
-The repository currently contains the first vertical slice: a read-only Linux FUSE driver, a native macOS FSKit extension, a local-directory reference provider, and a PKU NetDisk provider for IAAA and AnyShare. Sessions are opened for one run and are not persisted yet.
+The repository currently contains the first vertical slice: a read-only Linux FUSE driver, a native macOS FSKit extension, a local-directory reference provider, and a PKU NetDisk provider for IAAA and AnyShare. Saved CLI accounts keep renewable sessions in the host credential store; the sandboxed FSKit preview still uses a direct credential file until its account broker is implemented.
 
 ## Current status
 
@@ -10,7 +10,8 @@ The repository currently contains the first vertical slice: a read-only Linux FU
 | --- | --- |
 | Provider contract | Versioned read-only contract in `pkg/provider` |
 | Local provider | Implemented and tested |
-| PKU NetDisk | Implemented for read-only IAAA login, namespace traversal, and range reads |
+| PKU NetDisk | Implemented for read-only IAAA login, namespace traversal, range reads, and renewable sessions |
+| Account store | Metadata file plus macOS Keychain, Secret Service, or Windows Credential Manager |
 | Linux FUSE | Implemented with go-fuse; build tested, native mount requires the FUSE 3 package |
 | macOS FSKit | Implemented as a native user-space extension; no macFUSE or kernel extension |
 | Windows | CLI and provider layer build; WinFsp mount adapter is next |
@@ -53,7 +54,7 @@ bin/fusedock ls local --option root="$HOME/Documents" --json
 
 ## Mount PKU NetDisk
 
-The PKU provider signs in through IAAA and exposes the account's accessible AnyShare document libraries at the mount root. It does not persist a session; the credential file remains under your control.
+The PKU provider signs in through IAAA and exposes the account's accessible AnyShare document libraries at the mount root. Saved accounts keep the password and renewable session in the system credential store, never in the account metadata file.
 
 Interactive password entry:
 
@@ -62,14 +63,35 @@ mkdir -p /tmp/fusedock-pku
 bin/fusedock mount pku /tmp/fusedock-pku --username YOUR-CAMPUS-ID
 ```
 
-For repeatable local use, create an owner-only credential file with the helper script. The password prompt stays out of shell history:
+For repeatable local use, add a saved account. The password prompt stays out of shell history and command arguments:
+
+```sh
+bin/fusedock account add \
+  --provider pku \
+  --username YOUR-CAMPUS-ID \
+  --name pku \
+  --default
+bin/fusedock account ls
+bin/fusedock ls --account pku
+```
+
+The existing owner-only bootstrap-file flow remains available for the macOS FSKit preview and one-time migration:
 
 ```sh
 ./scripts/setup-pku-credentials.sh
 bin/fusedock ls pku --credential-file "$HOME/.config/fusedock/pku.credentials"
 ```
 
-The same file works with the macOS FSKit extension. Alternatively, pass a credential from an environment variable:
+Import it into the system credential store, verify the saved account, then remove the bootstrap file:
+
+```sh
+bin/fusedock account add \
+  --credential-file "$HOME/.config/fusedock/pku.credentials" \
+  --name pku --default
+bin/fusedock ls --account pku
+```
+
+The bootstrap file is still required by the current FSKit preview. See [accounts](docs/accounts.md) and the [FSKit boundary](docs/accounts.md#fskit-boundary). Alternatively, pass a credential from an environment variable:
 
 ```sh
 export FUSEDOCK_PKU_PASSWORD='your-password'
@@ -118,8 +140,12 @@ Read [the architecture](docs/architecture.md) for invariants, platform boundarie
 
 ```text
 fusedock providers
-fusedock ls [flags] <provider>
-fusedock mount [flags] <provider> <mountpoint>
+fusedock account add [flags]
+fusedock account ls [--json]
+fusedock account default <name>
+fusedock account remove <name>
+fusedock ls [flags] [provider]
+fusedock mount [flags] [provider] <mountpoint>
 fusedock version
 ```
 
