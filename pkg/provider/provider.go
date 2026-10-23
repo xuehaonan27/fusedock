@@ -129,6 +129,31 @@ type Factory interface {
 	Open(context.Context, OpenRequest) (Session, error)
 }
 
+// AuthorizeRequest carries the provider-specific configuration needed to start
+// an interactive account authorization. OpenURL opens the provider's trusted
+// verification page; Notify writes a human-readable instruction to the CLI.
+type AuthorizeRequest struct {
+	Options map[string]string
+	Secrets map[string][]byte
+	Prompt  PromptFunc
+	Notify  func(string)
+	OpenURL func(string) error
+}
+
+// Authorization is the result of an interactive flow. State is an opaque
+// renewable session persisted separately from secrets.
+type Authorization struct {
+	Username string
+	Secrets  map[string][]byte
+	State    []byte
+}
+
+// Authorizer is implemented by providers whose account setup needs more than a
+// static password or token. The CLI remains responsible for credential storage.
+type Authorizer interface {
+	Authorize(context.Context, AuthorizeRequest) (Authorization, error)
+}
+
 // Reader is a random-access read handle. Each call carries the caller's context;
 // a handle must not retain the context used to open it. Concurrent ReadAt calls
 // are allowed. Providers must bound the work performed for each requested range.

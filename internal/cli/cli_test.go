@@ -274,6 +274,71 @@ func TestBrokerCommandCreatesOneUseCapabilityAndCleansUp(t *testing.T) {
 	}
 }
 
+func TestAccountAddUsesProviderAuthorizer(t *testing.T) {
+	store := testAccountStore(t)
+	registry := provider.NewRegistry()
+	factory := &oauthFactory{}
+	if err := registry.Register(factory); err != nil {
+		t.Fatal(err)
+	}
+	config := filepath.Join(t.TempDir(), "oauth.credentials")
+	if err := os.WriteFile(config, []byte("provider=oauth\napp_key=public\nsecret_key=private\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	var stdout, stderr bytes.Buffer
+	code := Run(context.Background(), []string{"account", "add", "--credential-file", config, "--name", "oauth"}, IO{
+		Out: &stdout, Err: &stderr, Registry: registry, Accounts: store,
+		OpenURL: func(target string) error {
+			if target != "https://example.test/authorize" {
+				t.Errorf("authorization URL = %q", target)
+			}
+			return nil
+		},
+	})
+	if code != 0 {
+		t.Fatalf("add exit=%d stderr=%s", code, stderr.String())
+	}
+	account, secrets, state, err := store.Credentials(context.Background(), "oauth")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer clearSecrets(secrets)
+	if account.Username != "oauth-user" || string(secrets["app_key"]) != "public" || string(secrets["secret_key"]) != "private" || string(state) != `{"access":"session"}` {
+		t.Fatalf("unexpected account=%+v secrets=%q state=%q", account, secrets, state)
+	}
+}
+
+type oauthFactory struct{}
+
+func (*oauthFactory) Descriptor() provider.Descriptor {
+	return provider.Descriptor{
+		ContractVersion: provider.ContractVersion, ID: "oauth", Name: "OAuth fixture", Capabilities: provider.CapRead,
+		Credentials: []provider.CredentialSpec{
+			{Key: "app_key", Description: "app key"},
+			{Key: "secret_key", Description: "secret key", Secret: true, Required: true},
+		},
+	}
+}
+func (*oauthFactory) Open(_ context.Context, req provider.OpenRequest) (provider.Session, error) {
+	if string(req.State) != `{"access":"session"}` {
+		return nil, errors.New("missing state")
+	}
+	return fixtureSession{}, nil
+}
+func (*oauthFactory) Authorize(_ context.Context, req provider.AuthorizeRequest) (provider.Authorization, error) {
+	if string(req.Secrets["secret_key"]) != "private" {
+		return provider.Authorization{}, errors.New("missing secret")
+	}
+	if err := req.OpenURL("https://example.test/authorize"); err != nil {
+		return provider.Authorization{}, err
+	}
+	return provider.Authorization{
+		Username: "oauth-user",
+		Secrets:  map[string][]byte{"app_key": req.Secrets["app_key"], "secret_key": req.Secrets["secret_key"]},
+		State:    []byte(`{"access":"session"}`),
+	}, nil
+}
+
 type fixtureFactory struct {
 	username string
 	password string

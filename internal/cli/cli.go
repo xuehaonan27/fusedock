@@ -11,6 +11,7 @@ import (
 	"io"
 	"net"
 	"os"
+	"os/exec"
 	"runtime"
 	"sort"
 	"strings"
@@ -38,6 +39,7 @@ type IO struct {
 	Err      io.Writer
 	Registry *provider.Registry
 	Accounts *accounts.Store
+	OpenURL  func(string) error
 }
 
 func Run(ctx context.Context, args []string, streams IO) int {
@@ -297,7 +299,7 @@ func (f *providerFlags) openAccount(ctx context.Context, factory provider.Factor
 	for key, value := range overrides {
 		options[key] = value
 	}
-	if err := validateInputs(descriptor, options, storedSecrets, account.Username); err != nil {
+	if err := validateInputs(descriptor, options, storedSecrets, ""); err != nil {
 		return nil, err
 	}
 	request := provider.OpenRequest{
@@ -368,7 +370,7 @@ func mergeCredentialFile(descriptor provider.Descriptor, fileValues map[string][
 		knownCredentials[credential.Key] = true
 	}
 	for key, value := range fileValues {
-		if key == "provider" {
+		if key == "provider" || key == "name" || key == "account" {
 			continue
 		}
 		switch {
@@ -619,29 +621,20 @@ func runAccountAdd(ctx context.Context, args []string, streams IO) int {
 	}
 	secrets := make(map[string][]byte)
 	defer clearSecrets(secrets)
+	var fileValues map[string][]byte
 	if *credentialFile != "" {
-		values, err := credentials.Read(*credentialFile)
+		var err error
+		fileValues, err = credentials.Read(*credentialFile)
 		if err != nil {
 			fmt.Fprintln(streams.Err, "fusedock:", err)
 			return 1
 		}
-		defer clearSecrets(values)
+		defer clearSecrets(fileValues)
 		if *providerID == "" {
-			*providerID = strings.TrimSpace(string(values["provider"]))
+			*providerID = strings.TrimSpace(string(fileValues["provider"]))
 		}
 		if *username == "" {
-			*username = strings.TrimSpace(string(values["username"]))
-		}
-		for key, value := range values {
-			if key == "provider" || key == "username" || key == "password" {
-				continue
-			}
-			if _, exists := options[key]; !exists {
-				options[key] = string(value)
-			}
-		}
-		if value := values["password"]; len(value) > 0 {
-			secrets["password"] = append([]byte(nil), value...)
+			*username = strings.TrimSpace(string(fileValues["username"]))
 		}
 	}
 	if *providerID == "" {
@@ -653,23 +646,62 @@ func runAccountAdd(ctx context.Context, args []string, streams IO) int {
 		fmt.Fprintf(streams.Err, "fusedock: unknown provider %q\n", *providerID)
 		return 2
 	}
+	descriptor := factory.Descriptor()
+	if fileValues != nil {
+		if err := mergeCredentialFile(descriptor, fileValues, options, secrets); err != nil {
+			fmt.Fprintln(streams.Err, "fusedock:", err)
+			return 1
+		}
+		if value := secrets["username"]; len(value) > 0 {
+			if *username == "" {
+				*username = strings.TrimSpace(string(value))
+			}
+			clear(value)
+			delete(secrets, "username")
+		}
+	}
+	prompt := promptFunc(streams.In, streams.Out, streams.Err)
+	if err := promptCredentialFields(ctx, descriptor, secrets, prompt, *username); err != nil {
+		fmt.Fprintln(streams.Err, "fusedock:", err)
+		return 1
+	}
+	var initialState []byte
+	if authorizer, ok := factory.(provider.Authorizer); ok && len(secrets["access_token"]) == 0 && len(secrets["refresh_token"]) == 0 {
+		authorization, err := authorizer.Authorize(ctx, provider.AuthorizeRequest{
+			Options: options, Secrets: secrets, Prompt: prompt,
+			Notify: func(message string) { fmt.Fprintln(streams.Err, message) },
+			OpenURL: func(target string) error {
+				if streams.OpenURL != nil {
+					return streams.OpenURL(target)
+				}
+				return openBrowser(target)
+			},
+		})
+		if err != nil {
+			fmt.Fprintln(streams.Err, "fusedock:", err)
+			return 1
+		}
+		for key, value := range authorization.Secrets {
+			secrets[key] = append([]byte(nil), value...)
+		}
+		initialState = append([]byte(nil), authorization.State...)
+		if *username == "" {
+			*username = authorization.Username
+		}
+	}
 	if *username == "" {
-		value, err := promptFunc(streams.In, streams.Out, streams.Err)(ctx, provider.Prompt{Kind: "text", Message: "Provider username"})
+		value, err := prompt(ctx, provider.Prompt{Kind: "text", Message: "Provider username"})
 		if err != nil {
 			fmt.Fprintln(streams.Err, "fusedock:", err)
 			return 1
 		}
 		*username = value
 	}
-	if len(secrets["password"]) == 0 {
-		value, err := promptFunc(streams.In, streams.Out, streams.Err)(ctx, provider.Prompt{Kind: provider.PromptPassword, Message: "Password", Secret: true})
-		if err != nil {
-			fmt.Fprintln(streams.Err, "fusedock:", err)
-			return 1
-		}
-		secrets["password"] = []byte(value)
+	validationUsername := *username
+	if _, ok := factory.(provider.Authorizer); ok {
+		validationUsername = ""
 	}
-	if err := validateInputs(factory.Descriptor(), options, secrets, *username); err != nil {
+	if err := validateInputs(descriptor, options, secrets, validationUsername); err != nil {
 		fmt.Fprintln(streams.Err, "fusedock:", err)
 		return 2
 	}
@@ -682,15 +714,62 @@ func runAccountAdd(ctx context.Context, args []string, streams IO) int {
 		return 1
 	}
 	account := accounts.Account{Name: *name, Provider: *providerID, Username: *username, Options: options}
-	if err := store.Add(ctx, account, secrets, *makeDefault, *replace); err != nil {
+	if err := store.AddWithState(ctx, account, secrets, initialState, *makeDefault, *replace); err != nil {
 		fmt.Fprintln(streams.Err, "fusedock:", err)
 		return 1
 	}
 	fmt.Fprintf(streams.Out, "Account %s saved for provider %s.\n", account.Name, account.Provider)
 	if *credentialFile != "" {
-		fmt.Fprintf(streams.Out, "The password is now in the system credential store. After checkout succeeds, remove the bootstrap file: %s\n", *credentialFile)
+		fmt.Fprintf(streams.Out, "The bootstrap secrets are now in the system credential store. After checkout succeeds, remove: %s\n", *credentialFile)
 	}
 	return 0
+}
+
+func promptCredentialFields(ctx context.Context, descriptor provider.Descriptor, secrets map[string][]byte, prompt provider.PromptFunc, username string) error {
+	for _, spec := range descriptor.Credentials {
+		if spec.Key == "username" && username != "" {
+			continue
+		}
+		if len(secrets[spec.Key]) > 0 {
+			continue
+		}
+		if !spec.Required && spec.Key != "password" {
+			continue
+		}
+		kind := provider.PromptKind("text")
+		if spec.Secret {
+			kind = provider.PromptPassword
+		}
+		message := spec.Description
+		if message == "" {
+			message = spec.Key
+		}
+		value, err := prompt(ctx, provider.Prompt{Kind: kind, Message: message, Secret: spec.Secret})
+		if err != nil {
+			return err
+		}
+		if value == "" {
+			return fmt.Errorf("provider %s requires credential %s", descriptor.ID, spec.Key)
+		}
+		secrets[spec.Key] = []byte(value)
+	}
+	return nil
+}
+
+func openBrowser(target string) error {
+	var command *exec.Cmd
+	switch runtime.GOOS {
+	case "darwin":
+		command = exec.Command("open", target)
+	case "windows":
+		command = exec.Command("rundll32", "url.dll,FileProtocolHandler", target)
+	default:
+		command = exec.Command("xdg-open", target)
+	}
+	if err := command.Start(); err != nil {
+		return fmt.Errorf("open browser: %w", err)
+	}
+	return nil
 }
 
 func runAccountLS(ctx context.Context, args []string, streams IO) int {

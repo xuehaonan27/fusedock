@@ -39,7 +39,7 @@ The ordering is based on validating core contracts before multiplying surfaces a
 ## Provider coverage
 
 - Google Drive: OAuth with PKCE, shared-drive and shortcut semantics, Docs export decisions.
-- Baidu NetDisk: OAuth, pagination, rate limits, multipart ranges, and cloud-specific file types.
+- Baidu NetDisk: live acceptance, rate-limit handling, and cloud-specific file types.
 - Additional S3-compatible and WebDAV providers as lower-risk protocol implementations.
 - Provider conformance suite shared by built-in and external adapters.
 

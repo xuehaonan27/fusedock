@@ -24,6 +24,7 @@ The current packages are:
 | `pkg/provider` | Public provider contract, object model, registry, path resolver, common errors |
 | `internal/providers/local` | Local directory reference implementation confined by `os.Root` |
 | `internal/providers/pku` | IAAA authentication and AnyShare namespace/range adapter |
+| `internal/providers/baidu` | OAuth device authorization and XPAN namespace/range adapter |
 | `internal/vfs` | Metadata cache and per-handle block read cache |
 | `internal/fusefs` | Read-only Linux FUSE adapter; explicit FSKit guidance on macOS |
 | `internal/credentials` | Owner-only credential/configuration file parser |

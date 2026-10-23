@@ -11,12 +11,13 @@ The repository currently contains the first vertical slice: a read-only Linux FU
 | Provider contract | Versioned read-only contract in `pkg/provider` |
 | Local provider | Implemented and tested |
 | PKU NetDisk | Implemented for read-only IAAA login, namespace traversal, range reads, and renewable sessions |
+| Baidu NetDisk | Implemented for read-only OAuth device login, namespace traversal, range reads, and token refresh |
 | Account store | Metadata file plus macOS Keychain, Secret Service, or Windows Credential Manager |
 | Account broker | One-use loopback capability; secrets stay in the CLI/broker process |
 | Linux FUSE | Implemented with go-fuse; build tested, native mount requires the FUSE 3 package |
 | macOS FSKit | Implemented as a native user-space extension; no macFUSE or kernel extension |
 | Windows | CLI and provider layer build; WinFsp mount adapter is next |
-| Baidu NetDisk, Google Drive | Not implemented yet; both fit the same provider contract |
+| Google Drive | Not implemented yet; fits the same provider contract |
 | Writable mounts | Not implemented; the capability and conflict model is defined in the architecture |
 | Multi-account namespace | Not implemented; a session currently represents one account |
 
@@ -150,6 +151,18 @@ fusedock ls [flags] [provider]
 fusedock mount [flags] [provider] <mountpoint>
 fusedock version
 ```
+
+Baidu application credentials can be imported from an owner-only bootstrap file:
+
+```sh
+./scripts/setup-baidu-app.sh
+bin/fusedock account add \
+  --credential-file "$HOME/.config/fusedock/baidu-app.credentials" \
+  --name baidu --default
+bin/fusedock ls --account baidu
+```
+
+See the [Baidu guide](docs/baidu.md) for the device authorization flow and mount commands.
 
 Provider-specific configuration uses repeatable `--option key=value`. Credentials use `--credential-file PATH`, `--credential key=value`, or `--credential-env key=ENV`. Credential files must be regular files owned by the current user with no group or world permissions. Secrets are cleared from the in-memory map after the provider opens.
 

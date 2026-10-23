@@ -310,6 +310,12 @@ func (c Config) Find(name string) (Account, bool) {
 }
 
 func (s *Store) Add(ctx context.Context, account Account, secretValues map[string][]byte, makeDefault, replace bool) error {
+	return s.AddWithState(ctx, account, secretValues, nil, makeDefault, replace)
+}
+
+// AddWithState stores an initial renewable session alongside secrets. The
+// state must be opaque JSON and is not exposed in account listings.
+func (s *Store) AddWithState(ctx context.Context, account Account, secretValues map[string][]byte, state []byte, makeDefault, replace bool) error {
 	if !ValidName(account.Name) || !ValidID(account.Provider) || strings.TrimSpace(account.Username) == "" {
 		return errors.New("invalid account metadata")
 	}
@@ -347,6 +353,12 @@ func (s *Store) Add(ctx context.Context, account Account, secretValues map[strin
 		secret.Password = ""
 		if exists {
 			secret.State = nil
+		}
+		if len(state) > 0 {
+			if !json.Valid(state) {
+				return errors.New("initial provider state is invalid JSON")
+			}
+			secret.State = append(json.RawMessage(nil), state...)
 		}
 		if err := s.writeSecret(account.Name, secret); err != nil {
 			return err

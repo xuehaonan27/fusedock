@@ -8,7 +8,7 @@ FuseDock providers implement `pkg/provider`. A provider should be added only whe
 | PKU NetDisk | Implemented, read-only preview | Yes | No | IAAA login, AnyShare document libraries, signed range URLs, CAPTCHA/OTP prompts |
 | Account broker | Implemented | Yes | No | Loopback capability, read-only object protocol, no credential exposure |
 | Google Drive | Planned | No | No | OAuth with PKCE, shared drives, shortcuts, Google Docs export semantics |
-| Baidu NetDisk | Planned | No | No | OAuth, rate limits, multipart range constraints, cloud-specific file types |
+| Baidu NetDisk | Implemented, read-only preview | Yes | No | OAuth device flow, XPAN pagination, signed range downloads, token rotation |
 | S3-compatible | Planned | No | No | Endpoint configuration, list pagination, object ETags, multipart uploads |
 | WebDAV | Planned | No | No | Server-specific property support, locks, weak metadata, redirects |
 
@@ -34,7 +34,7 @@ OAuth should use PKCE and the system browser. Tokens must be stored as secrets b
 
 ## Baidu NetDisk
 
-Baidu's API needs its own pagination, token refresh, rate-limit, and multipart-range behavior. Cloud-specific constructs such as offline downloads, share links, and archives should be surfaced as provider operations instead of being forced into POSIX names.
+Baidu's provider uses official OAuth device authorization and XPAN APIs. It keeps `fs_id` object identity, handles paginated directory listings, and refreshes access tokens in the provider state. Signed download URLs are requested with bounded byte ranges and checked before bytes are returned; a server that ignores Range is reported as unsupported rather than producing incorrect data.
 
 The read adapter should validate every returned path component, include stable file identity in cache keys, and keep signed URLs out of logs. Write support waits for the shared conflict and recovery contract.
 
