@@ -5,6 +5,8 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
@@ -17,6 +19,7 @@ import (
 	"github.com/xuehaonan/fusedock/internal/credentials"
 	"github.com/xuehaonan/fusedock/internal/providers"
 	brokerprovider "github.com/xuehaonan/fusedock/internal/providers/broker"
+	"github.com/xuehaonan/fusedock/internal/providers/local"
 	"github.com/xuehaonan/fusedock/pkg/provider"
 )
 
@@ -306,6 +309,95 @@ func TestAccountAddUsesProviderAuthorizer(t *testing.T) {
 	if account.Username != "oauth-user" || string(secrets["app_key"]) != "public" || string(secrets["secret_key"]) != "private" || string(state) != `{"access":"session"}` {
 		t.Fatalf("unexpected account=%+v secrets=%q state=%q", account, secrets, state)
 	}
+}
+
+func TestBrokerServesScopedWebDAV(t *testing.T) {
+	store := testAccountStore(t)
+	root := t.TempDir()
+	if err := os.Mkdir(filepath.Join(root, "share"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "share", "file.txt"), []byte("webdav broker data"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	account := accounts.Account{
+		Name: "webdav", Provider: "localwebdav", Username: "fixture",
+		Options: map[string]string{"root": root},
+	}
+	if err := store.Add(context.Background(), account, map[string][]byte{"dummy": []byte("present")}, true, false); err != nil {
+		t.Fatal(err)
+	}
+	registry := provider.NewRegistry()
+	if err := registry.Register(localWebDAVFactory{}); err != nil {
+		t.Fatal(err)
+	}
+	authFile := filepath.Join(t.TempDir(), "private", "webdav.credentials")
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	var stdout, stderr bytes.Buffer
+	done := make(chan int, 1)
+	go func() {
+		done <- Run(ctx, []string{
+			"broker", "start", "--account", "webdav", "--webdav-auth-file", authFile,
+			"--webdav-scope", "/share", "--webdav-username", "tester",
+		}, IO{Out: &stdout, Err: &stderr, Registry: registry, Accounts: store})
+	}()
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		if _, err := os.Stat(authFile); err == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			cancel()
+			t.Fatalf("WebDAV auth file was not created; stderr=%s", stderr.String())
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	values, err := credentials.Read(authFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer clearSecrets(values)
+	endpoint := string(values["endpoint"])
+	if string(values["username"]) != "tester" || string(values["scope"]) != "/share" || !strings.HasSuffix(endpoint, "/webdav/") {
+		t.Fatalf("unexpected WebDAV auth file: %#v", values)
+	}
+	request, _ := http.NewRequest(http.MethodGet, endpoint+"file.txt", nil)
+	request.SetBasicAuth("tester", string(values["password"]))
+	response, err := http.DefaultClient.Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, _ := io.ReadAll(response.Body)
+	response.Body.Close()
+	if response.StatusCode != http.StatusOK || string(body) != "webdav broker data" {
+		t.Fatalf("WebDAV GET status=%d body=%q", response.StatusCode, body)
+	}
+	cancel()
+	select {
+	case code := <-done:
+		if code != 0 {
+			t.Fatalf("broker exit=%d stderr=%s", code, stderr.String())
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("broker did not stop")
+	}
+	if _, err := os.Stat(authFile); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("WebDAV auth file was not removed: %v", err)
+	}
+}
+
+type localWebDAVFactory struct{}
+
+func (localWebDAVFactory) Descriptor() provider.Descriptor {
+	return provider.Descriptor{
+		ContractVersion: provider.ContractVersion, ID: "localwebdav", Name: "Local WebDAV fixture", Capabilities: provider.CapRead,
+		Options:     []provider.OptionSpec{{Key: "root", Description: "root", Required: true}},
+		Credentials: []provider.CredentialSpec{{Key: "dummy", Description: "fixture secret"}},
+	}
+}
+func (localWebDAVFactory) Open(ctx context.Context, req provider.OpenRequest) (provider.Session, error) {
+	return local.Factory{}.Open(ctx, provider.OpenRequest{Options: req.Options})
 }
 
 type oauthFactory struct{}

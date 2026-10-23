@@ -28,6 +28,8 @@ import (
 	"github.com/xuehaonan/fusedock/internal/fusefs"
 	"github.com/xuehaonan/fusedock/internal/providers"
 	"github.com/xuehaonan/fusedock/internal/vfs"
+	"github.com/xuehaonan/fusedock/internal/webdavfs"
+	"github.com/xuehaonan/fusedock/internal/webdavservice"
 	"github.com/xuehaonan/fusedock/pkg/provider"
 )
 
@@ -97,7 +99,7 @@ Usage:
   fusedock account ls [--json]
   fusedock account default <name>
   fusedock account remove <name>
-  fusedock broker start --account NAME --config PATH
+  fusedock broker start --account NAME [--config PATH] [--webdav-auth-file PATH]
   fusedock ls [flags] [provider]
   fusedock mount [flags] [provider] <mountpoint>
   fusedock version
@@ -112,7 +114,7 @@ Run 'fusedock providers' for provider IDs and their options.
 
 func runBroker(ctx context.Context, args []string, streams IO) int {
 	if len(args) == 0 || helpRequested(args) {
-		fmt.Fprintln(streams.Out, "usage: fusedock broker start --account NAME --config PATH [-o key=value]")
+		fmt.Fprintln(streams.Out, "usage: fusedock broker start --account NAME (--config PATH and/or --webdav-auth-file PATH) [flags]")
 		return 0
 	}
 	if args[0] != "start" {
@@ -123,6 +125,11 @@ func runBroker(ctx context.Context, args []string, streams IO) int {
 	flags.SetOutput(streams.Err)
 	accountName := flags.String("account", "", "saved account to serve")
 	configPath := flags.String("config", "", "owner-only broker capability file to create")
+	webdavAuthFile := flags.String("webdav-auth-file", "", "enable WebDAV and write its owner-only login file")
+	webdavScope := flags.String("webdav-scope", "/", "provider path exposed as the WebDAV root")
+	webdavUsername := flags.String("webdav-username", "fusedock", "WebDAV Basic auth username")
+	var webdavOrigins []string
+	flags.StringArrayVar(&webdavOrigins, "webdav-allow-origin", nil, "exact browser origin allowed to use WebDAV (repeatable)")
 	var optionValues []string
 	flags.StringArrayVarP(&optionValues, "option", "o", nil, "provider option override key=value")
 	if err := flags.Parse(args[1:]); err != nil {
@@ -131,8 +138,12 @@ func runBroker(ctx context.Context, args []string, streams IO) int {
 		}
 		return 2
 	}
-	if flags.NArg() != 0 || *accountName == "" || *configPath == "" {
-		fmt.Fprintln(streams.Err, "usage: fusedock broker start --account NAME --config PATH [-o key=value]")
+	if flags.NArg() != 0 || *accountName == "" || (*configPath == "" && *webdavAuthFile == "") {
+		fmt.Fprintln(streams.Err, "usage: fusedock broker start --account NAME (--config PATH and/or --webdav-auth-file PATH) [flags]")
+		return 2
+	}
+	if *configPath != "" && *webdavAuthFile != "" && *configPath == *webdavAuthFile {
+		fmt.Fprintln(streams.Err, "fusedock: broker capability and WebDAV auth file must be different paths")
 		return 2
 	}
 	store, err := accountStore(streams)
@@ -155,17 +166,31 @@ func runBroker(ctx context.Context, args []string, streams IO) int {
 		fmt.Fprintf(streams.Err, "fusedock: account %q uses unknown provider %q\n", account.Name, account.Provider)
 		return 1
 	}
-	if err := credentials.EnsurePrivateParent(*configPath); err != nil {
-		fmt.Fprintln(streams.Err, "fusedock: prepare broker capability directory:", err)
-		return 1
+	var locks []*flock.Flock
+	defer func() {
+		for _, lock := range locks {
+			_ = lock.Close()
+		}
+	}()
+	for _, path := range []string{*configPath, *webdavAuthFile} {
+		if path == "" {
+			continue
+		}
+		if err := credentials.EnsurePrivateParent(path); err != nil {
+			fmt.Fprintln(streams.Err, "fusedock: prepare access file directory:", err)
+			return 1
+		}
+		lock := flock.New(path + ".lock")
+		locked, err := lock.TryLockContext(ctx, 25*time.Millisecond)
+		if err != nil || !locked {
+			if err == nil {
+				err = errors.New("path is already in use")
+			}
+			fmt.Fprintf(streams.Err, "fusedock: lock %s: %v\n", path, err)
+			return 1
+		}
+		locks = append(locks, lock)
 	}
-	lock := flock.New(*configPath + ".lock")
-	locked, err := lock.TryLockContext(ctx, 25*time.Millisecond)
-	if err != nil || !locked {
-		fmt.Fprintln(streams.Err, "fusedock: another broker is already using this config path")
-		return 1
-	}
-	defer lock.Close()
 	common := providerFlags{account: *accountName, accountStore: store, options: optionValues}
 	session, err := common.open(ctx, factory, promptFunc(streams.In, streams.Out, streams.Err))
 	if err != nil {
@@ -179,45 +204,91 @@ func runBroker(ctx context.Context, args []string, streams IO) int {
 		return 1
 	}
 	defer listener.Close()
-	var random [32]byte
-	if _, err := rand.Read(random[:]); err != nil {
+	bootstrap, err := newCapability()
+	if err != nil {
 		fmt.Fprintln(streams.Err, "fusedock: generate broker capability:", err)
 		return 1
 	}
-	bootstrap := base64.RawURLEncoding.EncodeToString(random[:])
-	clear(random[:])
 	server, err := broker.NewServer(session, bootstrap)
 	if err != nil {
 		fmt.Fprintln(streams.Err, "fusedock:", err)
 		return 1
 	}
-	server.SetOnClaim(func() { _ = os.Remove(*configPath) })
 	endpoint := "http://" + listener.Addr().String()
 	server.SetExpectedHost(listener.Addr().String())
+	if *configPath != "" {
+		server.SetOnClaim(func() { _ = os.Remove(*configPath) })
+	}
+	var webdavEndpoint string
+	if *webdavAuthFile != "" {
+		webdavToken, err := newCapability()
+		if err != nil {
+			fmt.Fprintln(streams.Err, "fusedock: generate WebDAV token:", err)
+			return 1
+		}
+		fs, err := webdavfs.New(ctx, vfs.New(session, 2*time.Second), *webdavScope)
+		if err != nil {
+			fmt.Fprintln(streams.Err, "fusedock: initialize WebDAV scope:", err)
+			return 1
+		}
+		service, err := webdavservice.New(webdavservice.Options{
+			FileSystem: fs, Username: *webdavUsername, Token: webdavToken,
+			Prefix: "/webdav", AllowedOrigins: webdavOrigins,
+		})
+		if err != nil {
+			fmt.Fprintln(streams.Err, "fusedock: initialize WebDAV:", err)
+			return 1
+		}
+		server.SetWebDAV(service.Handler())
+		webdavEndpoint = endpoint + "/webdav/"
+		if err := credentials.WritePrivate(*webdavAuthFile, map[string][]byte{
+			"endpoint": []byte(webdavEndpoint), "username": []byte(*webdavUsername),
+			"password": []byte(webdavToken), "scope": []byte(*webdavScope),
+		}); err != nil {
+			fmt.Fprintln(streams.Err, "fusedock: write WebDAV auth file:", err)
+			return 1
+		}
+		defer func() { _ = os.Remove(*webdavAuthFile) }()
+	}
+	if *configPath != "" {
+		if err := credentials.WritePrivate(*configPath, map[string][]byte{
+			"provider": []byte("broker"),
+			"endpoint": []byte(endpoint),
+			"token":    []byte(bootstrap),
+		}); err != nil {
+			fmt.Fprintln(streams.Err, "fusedock: write broker capability file:", err)
+			return 1
+		}
+		defer func() { _ = os.Remove(*configPath) }()
+	}
 	serveDone := make(chan error, 1)
 	go func() { serveDone <- server.Serve(ctx, listener) }()
-	if err := credentials.WritePrivate(*configPath, map[string][]byte{
-		"provider": []byte("broker"),
-		"endpoint": []byte(endpoint),
-		"token":    []byte(bootstrap),
-	}); err != nil {
-		_ = listener.Close()
-		<-serveDone
-		fmt.Fprintln(streams.Err, "fusedock: write broker capability file:", err)
-		return 1
-	}
-	defer func() { _ = os.Remove(*configPath) }()
 	fmt.Fprintf(streams.Out, "Broker ready for account %s at %s\n", account.Name, endpoint)
-	fmt.Fprintf(streams.Out, "Capability file: %s\n", *configPath)
-	if runtime.GOOS == "darwin" {
-		fmt.Fprintf(streams.Out, "Mount with: mount -t fusedock %s MOUNTPOINT\n", *configPath)
+	if *configPath != "" {
+		fmt.Fprintf(streams.Out, "FSKit capability file: %s\n", *configPath)
+		if runtime.GOOS == "darwin" {
+			fmt.Fprintf(streams.Out, "Mount with: mount -t fusedock %s MOUNTPOINT\n", *configPath)
+		}
 	}
-	fmt.Fprintln(streams.Out, "The capability file is removed after mount claims it. Press Ctrl-C to stop the broker.")
+	if webdavEndpoint != "" {
+		fmt.Fprintf(streams.Out, "WebDAV: %s\n", webdavEndpoint)
+		fmt.Fprintf(streams.Out, "WebDAV login file: %s\n", *webdavAuthFile)
+	}
+	fmt.Fprintln(streams.Out, "Press Ctrl-C to stop the broker. Temporary access files are removed on exit.")
 	if err := <-serveDone; err != nil {
 		fmt.Fprintln(streams.Err, "fusedock broker:", err)
 		return 1
 	}
 	return 0
+}
+
+func newCapability() (string, error) {
+	var random [32]byte
+	if _, err := rand.Read(random[:]); err != nil {
+		return "", err
+	}
+	defer clear(random[:])
+	return base64.RawURLEncoding.EncodeToString(random[:]), nil
 }
 
 type providerFlags struct {

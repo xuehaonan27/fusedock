@@ -30,6 +30,7 @@ type Server struct {
 	sessionToken string
 	expectedHost string
 	onClaim      func()
+	webdav       http.Handler
 }
 
 func NewServer(session provider.Session, bootstrap string) (*Server, error) {
@@ -58,6 +59,10 @@ func (s *Server) expectedHostMatches(host string) bool {
 // SetOnClaim installs a cleanup callback invoked after a bootstrap capability
 // is accepted. The callback must not block on the broker's own request path.
 func (s *Server) SetOnClaim(callback func()) { s.onClaim = callback }
+
+// SetWebDAV mounts an independently authenticated read-only WebDAV access
+// surface on the same loopback listener and provider session.
+func (s *Server) SetWebDAV(handler http.Handler) { s.webdav = handler }
 
 func (s *Server) Handler() http.Handler { return http.HandlerFunc(s.serveHTTP) }
 
@@ -93,6 +98,14 @@ func (s *Server) Serve(ctx context.Context, listener net.Listener) error {
 func (s *Server) serveHTTP(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("X-Content-Type-Options", "nosniff")
+	if s.webdav != nil && (r.URL.Path == "/webdav" || strings.HasPrefix(r.URL.Path, "/webdav/")) {
+		if !s.expectedHostMatches(r.Host) {
+			http.Error(w, "unexpected broker host", http.StatusMisdirectedRequest)
+			return
+		}
+		s.webdav.ServeHTTP(w, r)
+		return
+	}
 	if r.Method != http.MethodPost {
 		writeBrokerError(w, http.StatusMethodNotAllowed, "method", "POST is required")
 		return

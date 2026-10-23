@@ -14,6 +14,7 @@ The repository currently contains the first vertical slice: a read-only Linux FU
 | Baidu NetDisk | Implemented for read-only OAuth device login, namespace traversal, range reads, and token refresh |
 | Account store | Metadata file plus macOS Keychain, Secret Service, or Windows Credential Manager |
 | Account broker | One-use loopback capability; secrets stay in the CLI/broker process |
+| WebDAV | Read-only provider-backed surface for Finder, desktop clients, and browser apps |
 | Linux FUSE | Implemented with go-fuse; build tested, native mount requires the FUSE 3 package |
 | macOS FSKit | Implemented as a native user-space extension; no macFUSE or kernel extension |
 | Windows | CLI and provider layer build; WinFsp mount adapter is next |
@@ -146,7 +147,7 @@ fusedock account add [flags]
 fusedock account ls [--json]
 fusedock account default <name>
 fusedock account remove <name>
-fusedock broker start --account <name> --config <path>
+fusedock broker start --account <name> [--config <path>] [--webdav-auth-file <path>]
 fusedock ls [flags] [provider]
 fusedock mount [flags] [provider] <mountpoint>
 fusedock version
@@ -197,6 +198,19 @@ umount "$HOME/FuseDockPKU"
 ```
 
 Stop the mount before pressing Ctrl-C in the broker terminal. See the [macOS FSKit guide](docs/macos-fskit.md) and [broker security review](docs/security.md) for the trust boundary and residual risks.
+
+## WebDAV
+
+The same broker can expose a read-only WebDAV endpoint for Finder, desktop clients, and browser applications:
+
+```sh
+bin/fusedock broker start --account baidu \
+  --webdav-auth-file "$HOME/.config/fusedock/baidu.webdav.credentials" \
+  --webdav-scope /Documents \
+  --webdav-allow-origin http://localhost:3000
+```
+
+The endpoint, Basic-auth username, and process-scoped read-only token are written to the `0600` auth file. In Finder, choose **Go → Connect to Server** and enter the endpoint. The server advertises DAV class 1, supports `PROPFIND`, `GET`, `HEAD`, and byte ranges, and rejects all writes. See the [WebDAV guide](docs/webdav.md).
 
 ## Development
 

@@ -31,6 +31,7 @@ The ordering is based on validating core contracts before multiplying surfaces a
 
 - Add an NFS bridge as a macFUSE-free fallback.
 - Add a WinFsp adapter through cgofuse with native Windows mount tests.
+- Broaden WebDAV verification against Finder and third-party clients; add write support only after safe mutation semantics.
 - Add a background service or tray supervisor for each desktop platform.
 - Harden the broker with launchd lifecycle, a peer-authenticated Unix socket/XPC transport, and release packaging.
 - Add authenticated local GUI and native host adapters.

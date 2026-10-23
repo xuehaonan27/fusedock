@@ -31,6 +31,8 @@ The current packages are:
 | `internal/accounts` | Account metadata, OS credential storage, default selection, and session-state persistence |
 | `internal/broker` | Authenticated one-use claim and read-only loopback object protocol |
 | `internal/providers/broker` | Sandbox-safe provider client; secrets never cross into the extension |
+| `internal/webdavfs` | Provider namespace to read-only WebDAV file system adapter |
+| `internal/webdavservice` | Scoped Basic/Bearer auth, browser origin policy, and DAV class-1 method filtering |
 | `macos/FSKit` | Swift FSKit app extension and Xcode project |
 | `macos/bridge` | C ABI and Go `c-archive` for the FSKit extension |
 | `internal/cli` | Provider discovery, inspection, and mount orchestration |
@@ -98,6 +100,8 @@ Cross-account or cross-provider rename is `EXDEV`; copying followed by deletion 
 | Android/iOS | No mount | Reuse provider, VFS, and application services behind a native host |
 
 FUSE is not the product boundary. The provider and VFS layers remain usable by the native FSKit and planned WinFsp adapters and by a mobile GUI that browses and transfers files without mounting.
+
+WebDAV is another surface over the same broker/provider session. It is read-only, loopback-only by default, and can be scoped to a provider subtree. Writes remain unsupported until the shared mutation and recovery contract exists.
 
 ## Provider distribution
 

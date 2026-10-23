@@ -51,6 +51,15 @@ credential store
 | Oversized read or malformed request consumes memory | JSON/read/header limits and range validation. |
 | Token appears in process arguments or logs | Token is generated in memory and written only to the private capability file; CLI output omits it. |
 
+## WebDAV additions
+
+- WebDAV uses a separate process-scoped token from the one-use FSKit capability. Both are random 256-bit values and both files are owner-only.
+- The WebDAV token is bound to one broker's selected account and to an optional provider subtree. No account list or other-account session is exposed.
+- Basic authentication is accepted for native WebDAV clients; Bearer authentication is accepted for browser clients. All writes and LOCK/UNLOCK are rejected, and DAV class 1 advertises the read-only behavior.
+- An unknown `Origin` or a browser `Sec-Fetch-Site: cross-site` request is rejected. Wildcard CORS is not supported. A configured browser origin receives only `GET`, `HEAD`, `PROPFIND`, and `OPTIONS`; other responses use `Cross-Origin-Resource-Policy: same-origin`.
+- The broker binds the WebDAV handler and FSKit protocol to the same loopback listener and exact Host value. It cannot be switched to a LAN interface through a CLI flag.
+- ETags derive from provider object ID/version, not from a mutable path name. Range reads are validated by the provider before HTTP content serving.
+
 ## Residual risk
 
 The operating system does not provide a portable way to prove over loopback TCP that the caller is a specific sandboxed extension. A same-user process can read the private capability file before the extension claims it or race the one-use claim. If it wins, it can obtain read-only access to the selected account until the broker stops or the capability is revoked. It cannot obtain the password, refresh token, write access, account-management access, or access to a different account.
