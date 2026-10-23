@@ -139,6 +139,8 @@ The metadata cache coalesces concurrent listings and stats. Each open file handl
 
 Read [the architecture](docs/architecture.md) for invariants, platform boundaries, and the planned write path. Read [the provider guide](docs/provider-guide.md) to add a backend and [the provider matrix](docs/providers.md) for the supported and planned services.
 
+The prioritized backlog is in [TODO.md](TODO.md). The proposed persistent data-cache design is in [docs/persistent-block-cache.md](docs/persistent-block-cache.md); it is not implemented yet.
+
 ## Commands
 
 ```text

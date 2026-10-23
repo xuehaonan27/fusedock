@@ -60,6 +60,8 @@ The metadata cache stores short-lived directory snapshots and attributes. Concur
 
 An open file has one read handle. The VFS layer turns driver-size reads into 4 MiB aligned provider ranges and retains the most recently loaded block per handle. This removes repeated authentication and signed-URL work for ordinary sequential reads. It is an in-memory per-handle cache, not a durable disk cache.
 
+The proposed persistent block cache is specified in [persistent-block-cache.md](persistent-block-cache.md). It requires one cache owner in the broker/daemon, a stable account ID in the key, and a provider guarantee that an OpenRead serves the requested object version. It must not be enabled for Baidu until its download path is revision-bound.
+
 PKU performs two requests for a cold range: `osdownload` obtains a signed object request, and the object storage returns that exact byte range. The adapter verifies `Content-Range` and the selected revision size before exposing bytes. Signed URLs and their query strings are omitted from errors.
 
 The kernel can issue reads after the handle's original open request has returned. Passing context per `ReadAt` is therefore part of the provider contract.

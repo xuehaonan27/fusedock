@@ -1,5 +1,7 @@
 # Roadmap
 
+The actionable, prioritized backlog now lives in [TODO.md](../TODO.md). This file keeps the product-level roadmap context and should be read alongside it.
+
 The ordering is based on validating core contracts before multiplying surfaces and provider-specific behavior.
 
 ## 0.1 Read-only vertical slice
