@@ -2,7 +2,7 @@
 
 FuseDock turns cloud storage into local file systems through a provider-neutral core. A provider implements a small read contract once; the same provider can then serve CLI inspection, FUSE mounts, and future WinFsp, GUI, and mobile surfaces.
 
-The repository currently contains the first vertical slice: a read-only Linux FUSE driver, a native macOS FSKit extension, a local-directory reference provider, and a PKU NetDisk provider for IAAA and AnyShare. Saved CLI accounts keep renewable sessions in the host credential store; the sandboxed FSKit preview still uses a direct credential file until its account broker is implemented.
+The repository currently contains the first vertical slice: a read-only Linux FUSE driver, a native macOS FSKit extension, a local-directory reference provider, and a PKU NetDisk provider for IAAA and AnyShare. Saved CLI accounts keep renewable sessions in the host credential store; the sandboxed FSKit extension consumes them through a read-only local account broker.
 
 ## Current status
 
@@ -12,6 +12,7 @@ The repository currently contains the first vertical slice: a read-only Linux FU
 | Local provider | Implemented and tested |
 | PKU NetDisk | Implemented for read-only IAAA login, namespace traversal, range reads, and renewable sessions |
 | Account store | Metadata file plus macOS Keychain, Secret Service, or Windows Credential Manager |
+| Account broker | One-use loopback capability; secrets stay in the CLI/broker process |
 | Linux FUSE | Implemented with go-fuse; build tested, native mount requires the FUSE 3 package |
 | macOS FSKit | Implemented as a native user-space extension; no macFUSE or kernel extension |
 | Windows | CLI and provider layer build; WinFsp mount adapter is next |
@@ -75,7 +76,7 @@ bin/fusedock account ls
 bin/fusedock ls --account pku
 ```
 
-The existing owner-only bootstrap-file flow remains available for the macOS FSKit preview and one-time migration:
+The existing owner-only bootstrap-file flow remains available for one-time migration:
 
 ```sh
 ./scripts/setup-pku-credentials.sh
@@ -91,7 +92,7 @@ bin/fusedock account add \
 bin/fusedock ls --account pku
 ```
 
-The bootstrap file is still required by the current FSKit preview. See [accounts](docs/accounts.md) and the [FSKit boundary](docs/accounts.md#fskit-boundary). Alternatively, pass a credential from an environment variable:
+After migration, the CLI and FSKit broker use the system credential store. See [accounts](docs/accounts.md). Alternatively, pass a credential from an environment variable:
 
 ```sh
 export FUSEDOCK_PKU_PASSWORD='your-password'
@@ -144,6 +145,7 @@ fusedock account add [flags]
 fusedock account ls [--json]
 fusedock account default <name>
 fusedock account remove <name>
+fusedock broker start --account <name> --config <path>
 fusedock ls [flags] [provider]
 fusedock mount [flags] [provider] <mountpoint>
 fusedock version
@@ -164,7 +166,14 @@ open "$HOME/Applications/FuseDock.app"
 
 If macOS leaves that one toggle unresponsive after several development installs, quit System Settings and rerun `make macos-enable`. It backs up and repairs the per-user FSKit state before restarting the FSKit agent.
 
-Enable FuseDock under **System Settings → General → Login Items & Extensions → File System Extensions**, then mount:
+Enable FuseDock under **System Settings → General → Login Items & Extensions → File System Extensions**. Start the broker in one terminal:
+
+```sh
+bin/fusedock broker start --account pku \
+  --config "$HOME/.config/fusedock/pku.broker.credentials"
+```
+
+Mount from another terminal with the generated one-use capability file:
 
 ```sh
 mkdir -p "$HOME/FuseDockPKU"
@@ -174,7 +183,7 @@ mount -t fusedock \
 umount "$HOME/FuseDockPKU"
 ```
 
-See the [macOS FSKit guide](docs/macos-fskit.md) for the signed build, security-scoped credential handoff, and current limitations.
+Stop the mount before pressing Ctrl-C in the broker terminal. See the [macOS FSKit guide](docs/macos-fskit.md) and [broker security review](docs/security.md) for the trust boundary and residual risks.
 
 ## Development
 

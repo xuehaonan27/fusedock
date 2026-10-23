@@ -6,6 +6,7 @@ FuseDock providers implement `pkg/provider`. A provider should be added only whe
 | --- | --- | --- | --- | --- |
 | Local directory | Implemented | Yes | No | Reference implementation; `os.Root` confines symlink traversal |
 | PKU NetDisk | Implemented, read-only preview | Yes | No | IAAA login, AnyShare document libraries, signed range URLs, CAPTCHA/OTP prompts |
+| Account broker | Implemented | Yes | No | Loopback capability, read-only object protocol, no credential exposure |
 | Google Drive | Planned | No | No | OAuth with PKCE, shared drives, shortcuts, Google Docs export semantics |
 | Baidu NetDisk | Planned | No | No | OAuth, rate limits, multipart range constraints, cloud-specific file types |
 | S3-compatible | Planned | No | No | Endpoint configuration, list pagination, object ETags, multipart uploads |

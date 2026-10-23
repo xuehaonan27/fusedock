@@ -5,20 +5,22 @@ FuseDock's macOS backend uses Apple's FSKit extension framework. It does not req
 ## Architecture
 
 ```text
-mount -t fusedock <credential-file> <mountpoint>
+mount -t fusedock <broker-capability-file> <mountpoint>
                     |
              FSKit app extension (Swift)
                     |
              C ABI / static Go archive
                     |
-             provider + VFS (Go)
+          broker provider over loopback (Go)
+                    |
+   account broker + credential store (Go)
                     |
           PKU / Google Drive / Baidu / ...
 ```
 
 The Swift layer owns `FSUnaryFileSystem`, `FSVolume`, `FSItem`, and the FSKit callbacks. The Go static archive owns authentication, providers, metadata caching, and byte-range reads. The two layers communicate through the small API in `macos/bridge/main.go`; user credentials never cross the C boundary, only object IDs and byte ranges do.
 
-The source path passed to `mount` is a security-scoped file URL handled by FSKit. FuseDock opens it, authenticates the selected provider, and uses the same `pkg/provider` contract as the CLI and Linux FUSE backend.
+The source path passed to `mount` is a security-scoped capability file handled by FSKit. The extension claims a one-use bootstrap capability and then performs read-only provider operations against the broker. Account passwords and refresh tokens remain in the broker process.
 
 ## Requirements
 
@@ -42,46 +44,33 @@ In the app, click **Open Login Items & Extensions**, then enable **FuseDock** un
 
 If the toggle appears unresponsive after repeated local development builds, quit and reopen System Settings first. For a development install, `make macos-enable` repairs stale test module IDs in the user-level FSKit state, backs up the previous state under `~/.config/fusedock`, and restarts `fskit_agent`. Release builds should use the System Settings toggle and should not ship this repair path as a silent installation step.
 
-## Credential file
+## Account broker
 
-Create an owner-only file under the user's configuration directory with the helper script. It prompts locally and keeps the password out of shell history and command-line arguments.
-
-```sh
-./scripts/setup-pku-credentials.sh
-```
-
-The file format is:
-
-```text
-provider=pku
-username=YOUR-CAMPUS-ID
-password=YOUR-PASSWORD
-endpoint=https://disk.pku.edu.cn
-iaaa_endpoint=https://iaaa.pku.edu.cn
-```
-
-`endpoint` and `iaaa_endpoint` are optional; omit them to use the defaults. Provider options and credentials share the same file, so CLI inspection and FSKit use identical configuration:
+The recommended flow uses a saved account. Create it with the helper account command; the password prompt stays out of shell history.
 
 ```sh
-bin/fusedock ls pku --credential-file "$HOME/.config/fusedock/pku.credentials"
+bin/fusedock account add --provider pku --username YOUR-CAMPUS-ID --name pku --default
 ```
 
-FuseDock rejects symlinks, files owned by another user, group/world-accessible modes, duplicate keys, unknown provider keys, and files over 64 KiB. The password is cleared from the Go secret map after the provider opens. The file remains on disk for future mounts, so protect the containing directory and use full-disk encryption.
+Start the broker and keep it running while mounted:
 
-FSKit receives this file as a security-scoped path resource. The extension can read it without a broad `Downloads` or home-directory permission.
+```sh
+bin/fusedock broker start --account pku \
+  --config "$HOME/.config/fusedock/pku.broker.credentials"
+```
 
-## Mount
+The generated file contains a loopback endpoint and a one-use capability, not a password. The extension claims it once and keeps only an in-memory session capability. The file is removed immediately after the claim. Mount from another terminal:
 
 ```sh
 mkdir -p "$HOME/FuseDockPKU"
 mount -t fusedock \
-  "$HOME/.config/fusedock/pku.credentials" \
+  "$HOME/.config/fusedock/pku.broker.credentials" \
   "$HOME/FuseDockPKU"
-ls "$HOME/FuseDockPKU"
-umount "$HOME/FuseDockPKU"
 ```
 
-The mount is read-only. Writes return `EROFS`. Single-factor accounts open directly; if IAAA requires CAPTCHA or OTP while the FSKit extension has no prompt UI, the mount reports the verification error and the user must complete an interactive provider login path before retrying. The CLI account store keeps its password and renewable session in the system credential store, but the sandboxed FSKit extension cannot read them without user interaction. A future authenticated local account broker will provide that boundary and handle prompts through the app.
+The capability file is owner-only and can be claimed once. Do not run `fusedock ls broker --credential-file` against it before mounting: that would consume the claim. If a claim is lost or the broker exits, stop it and start a new broker; the old capability is not reusable.
+
+The mount is read-only. Writes return `EROFS`. Single-factor accounts open directly; if IAAA requires CAPTCHA or OTP while the broker has no interactive prompt context, the command reports the verification error. Run the account migration or an interactive CLI login first, then restart the broker. The broker security review is in [security.md](security.md).
 
 ## Why not macFUSE or File Provider
 
@@ -93,6 +82,7 @@ The NFS bridge remains a future fallback for systems where FSKit or extension de
 
 - The FSKit extension is read-only.
 - CAPTCHA/OTP prompts are not yet connected to the host application.
-- The FSKit extension's account-broker integration is pending; it currently requires the owner-only source credential file.
+- The broker is a foreground development process; launchd supervision and peer-authenticated XPC/Unix-socket transport are pending.
+- The legacy direct credential-file path remains as a fallback, but it is read-only and does not persist a refresh session.
 - The extension requires local signing and the one-time Filesystem Extension toggle.
 - The current implementation is a development build; distribution needs an app bundle, notarization, and a release workflow.

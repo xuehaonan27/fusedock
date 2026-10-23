@@ -28,10 +28,13 @@ struct ContentView: View {
 
             Text("Mount an account")
                 .font(.headline)
-            Text("mount -t fusedock ~/.config/fusedock/pku.credentials ~/FuseDockPKU")
+            Text("bin/fusedock broker start --account pku --config ~/.config/fusedock/pku.broker.credentials")
                 .font(.system(.body, design: .monospaced))
                 .textSelection(.enabled)
-            Text("The source path is an owner-only credential and provider configuration file. It is read through an FSKit security-scoped path resource; the file is not copied into the app.")
+            Text("mount -t fusedock ~/.config/fusedock/pku.broker.credentials ~/FuseDockPKU")
+                .font(.system(.body, design: .monospaced))
+                .textSelection(.enabled)
+            Text("The broker holds the Keychain-backed account and exposes a one-use, read-only capability. The password and refresh token never enter the extension.")
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
 

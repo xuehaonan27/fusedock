@@ -15,7 +15,6 @@ The ordering is based on validating core contracts before multiplying surfaces a
 
 - Run native FUSE acceptance on Linux and FSKit mount acceptance on macOS.
 - Add bounded disk cache keyed by account, object ID, version, and range.
-- Add a sandbox-safe local account broker for FSKit session access.
 - Add a multi-account virtual root.
 - Add mount supervision and clean diagnostics for stale sessions.
 - Add opt-in PKU live acceptance with a dedicated test account.
@@ -33,6 +32,7 @@ The ordering is based on validating core contracts before multiplying surfaces a
 - Add an NFS bridge as a macFUSE-free fallback.
 - Add a WinFsp adapter through cgofuse with native Windows mount tests.
 - Add a background service or tray supervisor for each desktop platform.
+- Harden the broker with launchd lifecycle, a peer-authenticated Unix socket/XPC transport, and release packaging.
 - Add authenticated local GUI and native host adapters.
 - Reuse provider/VFS services on mobile; do not expose a FUSE mount where the OS does not support it.
 

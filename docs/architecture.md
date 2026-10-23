@@ -28,6 +28,8 @@ The current packages are:
 | `internal/fusefs` | Read-only Linux FUSE adapter; explicit FSKit guidance on macOS |
 | `internal/credentials` | Owner-only credential/configuration file parser |
 | `internal/accounts` | Account metadata, OS credential storage, default selection, and session-state persistence |
+| `internal/broker` | Authenticated one-use claim and read-only loopback object protocol |
+| `internal/providers/broker` | Sandbox-safe provider client; secrets never cross into the extension |
 | `macos/FSKit` | Swift FSKit app extension and Xcode project |
 | `macos/bridge` | C ABI and Go `c-archive` for the FSKit extension |
 | `internal/cli` | Provider discovery, inspection, and mount orchestration |
@@ -114,7 +116,7 @@ The sidecar protocol is not part of this release. It must preserve stream cancel
 - PKU authentication only redirects between configured HTTPS origins. Loopback HTTP is allowed solely for local fixtures.
 - Passwords, OTPs, cookies, access tokens, and signed storage URLs are not included in errors.
 - Saved-account metadata is owner-only; passwords and provider session state use the host credential store. Secret updates are bound to provider and username and serialized across processes.
-- One-shot credential files remain supported for development and for the current sandboxed FSKit preview. A local authenticated account broker is required before the extension can consume the system credential store silently.
+- The sandboxed FSKit extension consumes accounts through the read-only broker. The broker's bootstrap capability can be claimed once; its session capability exists only in memory. The direct credential-file fallback remains for development.
 - A provider is trusted code once loaded. Runtime provider installation is therefore a deliberate future security feature, not an automatic download path.
 
 ## Non-goals for the first slice

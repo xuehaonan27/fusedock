@@ -8,6 +8,8 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
+	"sort"
 	"strings"
 )
 
@@ -87,6 +89,77 @@ func Read(path string) (map[string][]byte, error) {
 		return nil, errors.New("credential file contains no credentials")
 	}
 	return result, nil
+}
+
+// WritePrivate atomically replaces a key=value file in a private directory.
+// It is used for short-lived broker capability files and never for account
+// secrets. The caller must keep the returned path private.
+func WritePrivate(path string, values map[string][]byte) error {
+	if path == "" {
+		return errors.New("credential file path is required")
+	}
+	if len(values) == 0 {
+		return errors.New("credential file must contain at least one value")
+	}
+	dir := filepath.Dir(path)
+	if err := ensurePrivateDirectory(dir); err != nil {
+		return err
+	}
+	keys := make([]string, 0, len(values))
+	for key, value := range values {
+		if !validKey(key) || len(value) == 0 {
+			return fmt.Errorf("invalid credential %q", key)
+		}
+		if bytes.IndexFunc(value, func(r rune) bool { return r < 0x20 || r == 0x7f }) >= 0 {
+			return fmt.Errorf("credential %q contains a control character", key)
+		}
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	var data bytes.Buffer
+	for _, key := range keys {
+		data.WriteString(key)
+		data.WriteByte('=')
+		data.Write(values[key])
+		data.WriteByte('\n')
+	}
+	if data.Len() > maxFileBytes {
+		return errors.New("credential file exceeds 64 KiB")
+	}
+	tmp, err := os.CreateTemp(dir, ".credentials-*")
+	if err != nil {
+		return fmt.Errorf("create credential file: %w", err)
+	}
+	tmpName := tmp.Name()
+	defer os.Remove(tmpName)
+	if err := tmp.Chmod(0o600); err != nil {
+		tmp.Close()
+		return err
+	}
+	if _, err := tmp.Write(data.Bytes()); err != nil {
+		tmp.Close()
+		return err
+	}
+	if err := tmp.Sync(); err != nil {
+		tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	if err := installPrivate(tmpName, path); err != nil {
+		return err
+	}
+	return syncPrivateDirectory(dir)
+}
+
+// EnsurePrivateParent creates or validates the owner-only directory that will
+// contain a private credential or capability file.
+func EnsurePrivateParent(path string) error {
+	if path == "" {
+		return errors.New("credential file path is required")
+	}
+	return ensurePrivateDirectory(filepath.Dir(path))
 }
 
 func validKey(key string) bool {

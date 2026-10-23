@@ -3,20 +3,26 @@ package cli
 import (
 	"bufio"
 	"context"
+	"crypto/rand"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"os"
+	"runtime"
 	"sort"
 	"strings"
 	"text/tabwriter"
 	"time"
 
+	"github.com/gofrs/flock"
 	"github.com/spf13/pflag"
 	"golang.org/x/term"
 
 	"github.com/xuehaonan/fusedock/internal/accounts"
+	"github.com/xuehaonan/fusedock/internal/broker"
 	"github.com/xuehaonan/fusedock/internal/credentials"
 	"github.com/xuehaonan/fusedock/internal/fusefs"
 	"github.com/xuehaonan/fusedock/internal/providers"
@@ -67,6 +73,8 @@ func Run(ctx context.Context, args []string, streams IO) int {
 		return runProviders(args[1:], streams)
 	case "account":
 		return runAccount(ctx, args[1:], streams)
+	case "broker":
+		return runBroker(ctx, args[1:], streams)
 	case "ls":
 		return runLS(ctx, args[1:], streams)
 	case "mount":
@@ -87,6 +95,7 @@ Usage:
   fusedock account ls [--json]
   fusedock account default <name>
   fusedock account remove <name>
+  fusedock broker start --account NAME --config PATH
   fusedock ls [flags] [provider]
   fusedock mount [flags] [provider] <mountpoint>
   fusedock version
@@ -97,6 +106,116 @@ credential store. One-off commands can instead pass --credential-file,
 
 Run 'fusedock providers' for provider IDs and their options.
 `)
+}
+
+func runBroker(ctx context.Context, args []string, streams IO) int {
+	if len(args) == 0 || helpRequested(args) {
+		fmt.Fprintln(streams.Out, "usage: fusedock broker start --account NAME --config PATH [-o key=value]")
+		return 0
+	}
+	if args[0] != "start" {
+		fmt.Fprintf(streams.Err, "fusedock broker: unknown command %q\n", args[0])
+		return 2
+	}
+	flags := pflag.NewFlagSet("broker start", pflag.ContinueOnError)
+	flags.SetOutput(streams.Err)
+	accountName := flags.String("account", "", "saved account to serve")
+	configPath := flags.String("config", "", "owner-only broker capability file to create")
+	var optionValues []string
+	flags.StringArrayVarP(&optionValues, "option", "o", nil, "provider option override key=value")
+	if err := flags.Parse(args[1:]); err != nil {
+		if errors.Is(err, pflag.ErrHelp) {
+			return 0
+		}
+		return 2
+	}
+	if flags.NArg() != 0 || *accountName == "" || *configPath == "" {
+		fmt.Fprintln(streams.Err, "usage: fusedock broker start --account NAME --config PATH [-o key=value]")
+		return 2
+	}
+	store, err := accountStore(streams)
+	if err != nil {
+		fmt.Fprintln(streams.Err, "fusedock:", err)
+		return 1
+	}
+	config, err := store.Load(ctx)
+	if err != nil {
+		fmt.Fprintln(streams.Err, "fusedock:", err)
+		return 1
+	}
+	account, ok := config.Find(*accountName)
+	if !ok {
+		fmt.Fprintf(streams.Err, "fusedock: saved account %q was not found\n", *accountName)
+		return 1
+	}
+	factory, ok := streams.Registry.Get(account.Provider)
+	if !ok {
+		fmt.Fprintf(streams.Err, "fusedock: account %q uses unknown provider %q\n", account.Name, account.Provider)
+		return 1
+	}
+	if err := credentials.EnsurePrivateParent(*configPath); err != nil {
+		fmt.Fprintln(streams.Err, "fusedock: prepare broker capability directory:", err)
+		return 1
+	}
+	lock := flock.New(*configPath + ".lock")
+	locked, err := lock.TryLockContext(ctx, 25*time.Millisecond)
+	if err != nil || !locked {
+		fmt.Fprintln(streams.Err, "fusedock: another broker is already using this config path")
+		return 1
+	}
+	defer lock.Close()
+	common := providerFlags{account: *accountName, accountStore: store, options: optionValues}
+	session, err := common.open(ctx, factory, promptFunc(streams.In, streams.Out, streams.Err))
+	if err != nil {
+		fmt.Fprintln(streams.Err, "fusedock:", err)
+		return 1
+	}
+	defer session.Close()
+	listener, err := net.Listen("tcp4", "127.0.0.1:0")
+	if err != nil {
+		fmt.Fprintln(streams.Err, "fusedock: create broker listener:", err)
+		return 1
+	}
+	defer listener.Close()
+	var random [32]byte
+	if _, err := rand.Read(random[:]); err != nil {
+		fmt.Fprintln(streams.Err, "fusedock: generate broker capability:", err)
+		return 1
+	}
+	bootstrap := base64.RawURLEncoding.EncodeToString(random[:])
+	clear(random[:])
+	server, err := broker.NewServer(session, bootstrap)
+	if err != nil {
+		fmt.Fprintln(streams.Err, "fusedock:", err)
+		return 1
+	}
+	server.SetOnClaim(func() { _ = os.Remove(*configPath) })
+	endpoint := "http://" + listener.Addr().String()
+	server.SetExpectedHost(listener.Addr().String())
+	serveDone := make(chan error, 1)
+	go func() { serveDone <- server.Serve(ctx, listener) }()
+	if err := credentials.WritePrivate(*configPath, map[string][]byte{
+		"provider": []byte("broker"),
+		"endpoint": []byte(endpoint),
+		"token":    []byte(bootstrap),
+	}); err != nil {
+		_ = listener.Close()
+		<-serveDone
+		fmt.Fprintln(streams.Err, "fusedock: write broker capability file:", err)
+		return 1
+	}
+	defer func() { _ = os.Remove(*configPath) }()
+	fmt.Fprintf(streams.Out, "Broker ready for account %s at %s\n", account.Name, endpoint)
+	fmt.Fprintf(streams.Out, "Capability file: %s\n", *configPath)
+	if runtime.GOOS == "darwin" {
+		fmt.Fprintf(streams.Out, "Mount with: mount -t fusedock %s MOUNTPOINT\n", *configPath)
+	}
+	fmt.Fprintln(streams.Out, "The capability file is removed after mount claims it. Press Ctrl-C to stop the broker.")
+	if err := <-serveDone; err != nil {
+		fmt.Fprintln(streams.Err, "fusedock broker:", err)
+		return 1
+	}
+	return 0
 }
 
 type providerFlags struct {

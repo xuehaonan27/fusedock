@@ -4,15 +4,19 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/zalando/go-keyring"
 
 	"github.com/xuehaonan/fusedock/internal/accounts"
+	"github.com/xuehaonan/fusedock/internal/credentials"
 	"github.com/xuehaonan/fusedock/internal/providers"
+	brokerprovider "github.com/xuehaonan/fusedock/internal/providers/broker"
 	"github.com/xuehaonan/fusedock/pkg/provider"
 )
 
@@ -194,6 +198,79 @@ func TestAccountAddAndUse(t *testing.T) {
 	}
 	if strings.Contains(stdout.String(), "secret") || strings.Contains(stdout.String(), "password") {
 		t.Fatalf("account listing exposed secret material: %s", stdout.String())
+	}
+}
+
+func TestBrokerCommandCreatesOneUseCapabilityAndCleansUp(t *testing.T) {
+	store := testAccountStore(t)
+	registry := provider.NewRegistry()
+	factory := &fixtureFactory{}
+	if err := registry.Register(factory); err != nil {
+		t.Fatal(err)
+	}
+	account := accounts.Account{Name: "fixture", Provider: "fake", Username: "fixture"}
+	if err := store.Add(context.Background(), account, map[string][]byte{"password": []byte("secret")}, true, false); err != nil {
+		t.Fatal(err)
+	}
+	configPath := filepath.Join(t.TempDir(), "private", "broker.credentials")
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	var stdout, stderr bytes.Buffer
+	done := make(chan int, 1)
+	go func() {
+		done <- Run(ctx, []string{"broker", "start", "--account", "fixture", "--config", configPath}, IO{
+			Out: &stdout, Err: &stderr, Registry: registry, Accounts: store,
+		})
+	}()
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		if _, err := os.Stat(configPath); err == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			cancel()
+			t.Fatalf("broker capability was not created; stderr=%s", stderr.String())
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	values, err := credentials.Read(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer clearSecrets(values)
+	if string(values["provider"]) != "broker" || !strings.HasPrefix(string(values["endpoint"]), "http://127.0.0.1:") || len(values["token"]) < 32 {
+		t.Fatalf("invalid broker capability file: %#v", values)
+	}
+	if strings.Contains(string(values["token"]), "secret") {
+		t.Fatal("broker capability contains the account password")
+	}
+	brokerSession, err := (brokerprovider.Factory{}).Open(ctx, provider.OpenRequest{
+		Options: map[string]string{"endpoint": string(values["endpoint"])},
+		Secrets: map[string][]byte{"token": append([]byte(nil), values["token"]...)},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(configPath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("bootstrap capability file survived claim: %v", err)
+	}
+	if err := brokerSession.Close(); err != nil {
+		t.Fatal(err)
+	}
+	cancel()
+	select {
+	case code := <-done:
+		if code != 0 {
+			t.Fatalf("broker exit=%d stderr=%s", code, stderr.String())
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("broker command did not stop")
+	}
+	if strings.Contains(stdout.String(), string(values["token"])) {
+		t.Fatal("broker command printed the bootstrap capability")
+	}
+	if _, err := os.Stat(configPath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("capability file was not removed: %v", err)
 	}
 }
 

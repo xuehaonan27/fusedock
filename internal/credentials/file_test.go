@@ -59,6 +59,45 @@ func TestReadRejectsDuplicateKeys(t *testing.T) {
 	}
 }
 
+func TestWritePrivateRoundTrip(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "private", "broker.credentials")
+	values := map[string][]byte{
+		"provider": []byte("broker"),
+		"endpoint": []byte("http://127.0.0.1:43210"),
+		"token":    []byte("capability"),
+	}
+	if err := WritePrivate(path, values); err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode().Perm() != 0o600 {
+		t.Fatalf("mode = %o", info.Mode().Perm())
+	}
+	read, err := Read(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer clearValues(read)
+	for key, value := range values {
+		if string(read[key]) != string(value) {
+			t.Errorf("%s = %q", key, read[key])
+		}
+	}
+}
+
+func TestWritePrivateRejectsBroadDirectory(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "shared")
+	if err := os.Mkdir(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := WritePrivate(filepath.Join(dir, "broker.credentials"), map[string][]byte{"token": []byte("secret")}); err == nil {
+		t.Fatal("wrote capability into a group/world-accessible directory")
+	}
+}
+
 func clearValues(values map[string][]byte) {
 	for key, value := range values {
 		clear(value)
