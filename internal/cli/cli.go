@@ -10,10 +10,12 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"net/netip"
 	"os"
 	"os/exec"
 	"runtime"
 	"sort"
+	"strconv"
 	"strings"
 	"text/tabwriter"
 	"time"
@@ -128,6 +130,7 @@ func runBroker(ctx context.Context, args []string, streams IO) int {
 	webdavAuthFile := flags.String("webdav-auth-file", "", "enable WebDAV and write its owner-only login file")
 	webdavScope := flags.String("webdav-scope", "/", "provider path exposed as the WebDAV root")
 	webdavUsername := flags.String("webdav-username", "fusedock", "WebDAV Basic auth username")
+	listenAddress := flags.String("listen", "127.0.0.1:0", "loopback broker listen address; use a fixed port for stable Finder favorites")
 	var webdavOrigins []string
 	flags.StringArrayVar(&webdavOrigins, "webdav-allow-origin", nil, "exact browser origin allowed to use WebDAV (repeatable)")
 	var optionValues []string
@@ -144,6 +147,10 @@ func runBroker(ctx context.Context, args []string, streams IO) int {
 	}
 	if *configPath != "" && *webdavAuthFile != "" && *configPath == *webdavAuthFile {
 		fmt.Fprintln(streams.Err, "fusedock: broker capability and WebDAV auth file must be different paths")
+		return 2
+	}
+	if err := validateListenAddress(*listenAddress); err != nil {
+		fmt.Fprintln(streams.Err, "fusedock:", err)
 		return 2
 	}
 	store, err := accountStore(streams)
@@ -198,7 +205,7 @@ func runBroker(ctx context.Context, args []string, streams IO) int {
 		return 1
 	}
 	defer session.Close()
-	listener, err := net.Listen("tcp4", "127.0.0.1:0")
+	listener, err := net.Listen("tcp4", *listenAddress)
 	if err != nil {
 		fmt.Fprintln(streams.Err, "fusedock: create broker listener:", err)
 		return 1
@@ -280,6 +287,22 @@ func runBroker(ctx context.Context, args []string, streams IO) int {
 		return 1
 	}
 	return 0
+}
+
+func validateListenAddress(address string) error {
+	host, port, err := net.SplitHostPort(address)
+	if err != nil || port == "" {
+		return errors.New("--listen must be a loopback address with a port, for example 127.0.0.1:17893")
+	}
+	addr, err := netip.ParseAddr(host)
+	if err != nil || !addr.Is4() || !addr.IsLoopback() {
+		return errors.New("--listen must use the literal IPv4 loopback address 127.0.0.1")
+	}
+	portNumber, err := strconv.Atoi(port)
+	if err != nil || portNumber < 0 || portNumber > 65535 {
+		return errors.New("--listen port must be between 0 and 65535")
+	}
+	return nil
 }
 
 func newCapability() (string, error) {

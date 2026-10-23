@@ -12,6 +12,16 @@ bin/fusedock broker start --account baidu \
   --webdav-auth-file "$HOME/.config/fusedock/baidu.webdav.credentials"
 ```
 
+For a stable Finder favorite, choose a fixed loopback port:
+
+```sh
+bin/fusedock broker start --account baidu \
+  --listen 127.0.0.1:17893 \
+  --webdav-auth-file "$HOME/.config/fusedock/baidu.webdav.credentials"
+```
+
+The default is an ephemeral port. A fixed port survives broker restarts, while the read-only token is still regenerated and written to the private auth file. The listener cannot be changed to a wildcard or LAN address.
+
 For WebDAV only, omit `--config`. For FSKit only, omit `--webdav-auth-file`.
 
 The broker prints the WebDAV endpoint. The auth file contains the exact values needed by a WebDAV client:
@@ -63,6 +73,18 @@ await fetch(endpoint + "path/to/file", {
 ```
 
 The server allows `GET`, `HEAD`, `PROPFIND`, and `OPTIONS` from the configured origin. It never enables wildcard CORS and rejects any request whose `Origin` is not in the allowlist. Native clients without an `Origin` header use Basic auth or `Authorization: Bearer`.
+
+## Finder reports “additional users”
+
+macOS sometimes shows:
+
+```text
+This file server will not allow any additional users to log in. Please try again later.
+```
+
+This is a misleading NetAuthAgent message for error number 61, `ECONNREFUSED`. It normally means the broker is no longer running or Finder is using an endpoint from a previous broker process. Ephemeral endpoints change on every broker start.
+
+Check that the broker terminal is still running, then reconnect using the current `endpoint` from the auth file. For a persistent Finder connection, restart the broker with a fixed `--listen 127.0.0.1:PORT` address and remove the old Finder favorite. A stale favorite for a stopped broker will keep producing this message even though neither authentication nor the WebDAV server is reachable.
 
 ## Semantics
 

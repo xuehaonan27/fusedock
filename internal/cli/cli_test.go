@@ -387,6 +387,21 @@ func TestBrokerServesScopedWebDAV(t *testing.T) {
 	}
 }
 
+func TestBrokerListenAddressValidation(t *testing.T) {
+	valid := []string{"127.0.0.1:0", "127.0.0.1:17893"}
+	for _, address := range valid {
+		if err := validateListenAddress(address); err != nil {
+			t.Errorf("valid address %q: %v", address, err)
+		}
+	}
+	invalid := []string{"0.0.0.0:17893", "192.168.1.10:17893", "localhost:17893", "[::1]:17893", "127.0.0.1", "127.0.0.1:99999"}
+	for _, address := range invalid {
+		if err := validateListenAddress(address); err == nil {
+			t.Errorf("invalid address %q was accepted", address)
+		}
+	}
+}
+
 type localWebDAVFactory struct{}
 
 func (localWebDAVFactory) Descriptor() provider.Descriptor {

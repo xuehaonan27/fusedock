@@ -205,6 +205,7 @@ The same broker can expose a read-only WebDAV endpoint for Finder, desktop clien
 
 ```sh
 bin/fusedock broker start --account baidu \
+  --listen 127.0.0.1:17893 \
   --webdav-auth-file "$HOME/.config/fusedock/baidu.webdav.credentials" \
   --webdav-scope /Documents \
   --webdav-allow-origin http://localhost:3000
