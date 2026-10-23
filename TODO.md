@@ -4,16 +4,30 @@ This is the prioritized engineering backlog. It records the next product stages;
 
 The immediate dependency order is:
 
-1. A supervised broker/daemon and a local control plane.
-2. A persistent, version-safe block cache shared by FSKit, WebDAV, and CLI.
-3. Multi-account namespaces.
-4. More providers and native platform drivers.
-5. Version-checked writes and recovery.
-6. Distribution, security hardening, and the external provider SDK.
+1. Immutable account and object identity under a shared namespace contract.
+2. A supervised broker/daemon and authenticated local control plane that owns those namespaces.
+3. A persistent, version-safe block cache shared by FSKit, WebDAV, and CLI.
+4. Aggregate and scoped multi-account views across native platforms.
+5. More providers and native platform drivers.
+6. Version-checked writes and recovery.
+7. Distribution, security hardening, and the external provider SDK.
 
-Do not start the write path before the persistent cache and account identity model are stable.
+Do not enable a shared disk cache before the namespace contract is implemented and tested. Do not start the write path before the persistent cache and identity model are stable.
 
-## 0.2 Local service foundation
+## 0.2 Namespace and local service foundation
+
+### Identity and namespace resolution
+
+- [ ] Implement [docs/namespace-contract.md](docs/namespace-contract.md).
+- [ ] Add an opaque random `AccountID` to each saved account; never derive or reuse it.
+- [ ] Migrate the account store atomically to the new version and fail closed if migration cannot complete.
+- [ ] Preserve an account ID for credential/state rotation with an unchanged provider binding; rotate it on provider, endpoint, username, or option changes.
+- [ ] Enforce case-insensitive, cross-platform account aliases and reserve FuseDock's virtual names.
+- [ ] Add a scoped namespace/resolver object containing `NamespaceKey`, `NodeKey`, and the exact `ObjectRevision` used for reads.
+- [ ] Require durable object IDs and revision-bound reads before a provider may enable persistent inode or data caching.
+- [ ] Derive FUSE and FSKit node identifiers from the full node key, detect collisions, and stop hashing only the bare provider object ID.
+
+Acceptance: an unchanged account keeps its ID across restart and reauthentication; removing and recreating it produces a different ID; identical object IDs in two accounts cannot share an inode or cache namespace; the same object exposed through aggregate and single-account views resolves to the same node key.
 
 ### fusedockd lifecycle
 
@@ -49,7 +63,6 @@ Acceptance: Finder can reconnect after a daemon restart using the same saved ser
 ### Persistent block cache
 
 - [ ] Implement the design in [docs/persistent-block-cache.md](docs/persistent-block-cache.md).
-- [ ] Add a stable immutable account ID to the account store before enabling shared disk data.
 - [ ] Make one broker/daemon process the cache owner and pass one cached VFS session to FSKit and WebDAV.
 - [ ] Remove duplicate per-handle block caching where it would compete with the shared cache.
 - [ ] Add cache info, clear, prune, and integrity-check commands.
@@ -70,7 +83,7 @@ Acceptance: reopening an unchanged file after a daemon restart serves its cached
 ### Multi-account virtual root
 
 - [ ] Allow one broker session to expose several saved accounts, for example /pku, /baidu, and /onedrive.
-- [ ] Give each account a stable ID, independent provider session, refresh lock, cache namespace, and inode namespace.
+- [ ] Give each account an independent provider session, refresh lock, cache namespace, and inode namespace keyed by its immutable account ID.
 - [ ] Reject cross-account rename with EXDEV before any remote mutation.
 - [ ] Deduplicate shared quota only when account/server/library identity proves it is the same backing store.
 - [ ] Support single-account and aggregate views in FSKit, WebDAV, CLI, and future GUI surfaces.

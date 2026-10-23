@@ -141,6 +141,8 @@ Read [the architecture](docs/architecture.md) for invariants, platform boundarie
 
 The prioritized backlog is in [TODO.md](TODO.md). The proposed persistent data-cache design is in [docs/persistent-block-cache.md](docs/persistent-block-cache.md); it is not implemented yet.
 
+The account, object, surface-path, inode, and cache identity rules are specified in [docs/namespace-contract.md](docs/namespace-contract.md).
+
 ## Commands
 
 ```text

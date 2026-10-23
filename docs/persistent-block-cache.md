@@ -2,6 +2,8 @@
 
 Status: design proposal. The current implementation has only a short-lived in-memory single-block cache per open handle. No file data is currently persisted by FuseDock.
 
+The account, object, path, and inode identities used here are defined by [namespace-contract.md](namespace-contract.md). This design depends on that contract being implemented first.
+
 ## What it is for
 
 The persistent block cache should let a later FSKit, WebDAV, or CLI operation reuse a range that an earlier operation already downloaded. It is a read cache, not a sync engine, and it should survive daemon restarts without becoming a second source of truth.
@@ -45,29 +47,32 @@ For direct Linux FUSE mounts before fusedockd exists, the mount process may own 
 A block key has these logical parts:
 
 ~~~
-account ID + provider ID + endpoint + object ID + object version
+account ID + provider ID + object ID + object version
            + file size + block offset/length
 ~~~
 
-The account ID must be a new immutable value in the account store, not the display name. Renaming an account must not rename its cache namespace. Recreating an account with the same name must receive a new ID so old file bytes cannot be mistaken for the new account's data.
+The account ID is an immutable value in the account store, not the display name. Renaming an account does not change its cache namespace. Recreating an account with the same name receives a new ID so old file bytes cannot be mistaken for the new account's data. Changing the provider, endpoint, username, or identity-affecting options also rotates the account ID.
 
 The path name and cache header must not contain a readable account name, remote file name, object path, signed URL, or token. Use a SHA-256 digest of a length-prefixed encoding:
 
 ~~~
+namespaceTag = SHA-256(
+  "fusedock-namespace-v1" || NUL ||
+  len(accountID) || accountID ||
+  len(providerID) || providerID
+)
+
 keyHash = SHA-256(
-  "fusedock-block-v1" || NUL ||
+  "fusedock-block-v2" || NUL ||
   len(accountID) || accountID ||
   len(providerID) || providerID ||
-  len(normalizedEndpoint) || normalizedEndpoint ||
   len(objectID) || objectID ||
   len(version) || version ||
-  decimal(fileSize) || NUL ||
-  decimal(blockOffset) || NUL ||
-  decimal(blockLength)
+  uint64(fileSize) || uint64(blockOffset) || uint64(blockLength)
 )
 ~~~
 
-Length prefixes avoid ambiguity when an object ID contains delimiters. The endpoint is included so two servers cannot share blocks because of an account-store copy or migration mistake.
+Length prefixes avoid ambiguity when an object ID contains delimiters. Integers are fixed-width big-endian values. The endpoint is a binding input that causes account-ID rotation, so it is not a second identity maintained by the cache. A bug that preserves an account ID across a rebind violates the namespace contract and must disable access to the old cache namespace rather than attempt to merge it.
 
 ### Version requirements
 
@@ -93,10 +98,10 @@ Default roots:
 blocks/v1/
   owner.lock
   tmp/
-  entries/<keyHash>.blk
+  entries/<namespaceTag>/<keyHash>.blk
 ~~~
 
-The directory is private (0700 on Unix). Block files are regular files created with 0600, inside an opened root that rejects symlinks and path traversal. Windows requires a protected current-user ACL and reparse-point rejection before this feature is enabled.
+The namespace-tagged directory is derived only from opaque IDs, allowing per-account accounting and clearing without exposing an alias or remote name. The root is private (0700 on Unix). Block files are regular files created with 0600, inside an opened root that rejects symlinks and path traversal. Windows requires a protected current-user ACL and reparse-point rejection before this feature is enabled.
 
 Each block file is self-describing and contains no remote names:
 
@@ -266,7 +271,7 @@ Acceptance for enabling it by default:
 
 ## Rollout sequence
 
-1. Add stable account IDs and version-bound provider conformance tests.
+1. Implement the namespace contract, including stable account IDs and version-bound provider conformance tests.
 2. Add the cache package with an in-memory index and no integration; exercise it against local fixtures only.
 3. Publish and validate block files atomically; add restart, corruption, and eviction tests.
 4. Wire one cached VFS session into both FSKit and WebDAV in the broker process.

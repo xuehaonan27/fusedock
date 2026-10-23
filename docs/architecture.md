@@ -42,7 +42,7 @@ The current packages are:
 A `provider.Session` represents one authenticated account and one namespace.
 
 1. `Root` returns a directory object and does not perform a vendor-specific path lookup.
-2. Every object ID is non-empty, stable for the session, and unique within that session.
+2. Every object ID is non-empty and unique within its account/provider namespace. Durable inode and data caching require it to remain stable across session restarts for the same account binding.
 3. `Version` changes whenever file content or relevant metadata changes. Providers that do not have a native revision should synthesize one from a stable timestamp and size.
 4. Every child's `Name` is a single path component. `/`, `\`, NUL, `.` and `..` are invalid. Duplicate names in one listing are an error.
 5. `List` returns a complete snapshot for one directory. Provider pagination stays inside the adapter.
@@ -68,13 +68,15 @@ The kernel can issue reads after the handle's original open request has returned
 
 ## Account and cache identity
 
+The identity model is specified in [namespace-contract.md](namespace-contract.md). A saved account has an immutable random ID in addition to its display alias. Changing the alias preserves that ID; changing the provider binding creates a new one. A provider object is scoped by account ID and provider ID, while its displayed path is only presentation.
+
 The eventual cache key must include:
 
 ```text
-account namespace + provider ID + object ID + version + byte range
+account ID + provider ID + object ID + version + file size + byte range
 ```
 
-The current release mounts one session per mount point, so the account dimension is implicit. Multi-account mounts will add a virtual first-level account directory and scope IDs before they reach a provider. A shared library must not be confused with a local copy merely because two accounts can see the same name.
+The current release mounts one session per mount point, so the account dimension is implicit. Multi-account mounts will add a virtual first-level account directory and scope IDs before they reach a provider. A shared library must not be confused with a local copy merely because two accounts can see the same name. A bare `Object.ID` is not sufficient for an inode or cache key once two accounts can expose the same vendor ID.
 
 The read cache is not a synchronization cache. A changed version causes a new range; it does not merge local and remote contents.
 
