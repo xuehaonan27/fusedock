@@ -143,6 +143,8 @@ The prioritized backlog is in [TODO.md](TODO.md). The proposed persistent data-c
 
 The account, object, surface-path, inode, and cache identity rules are specified in [docs/namespace-contract.md](docs/namespace-contract.md).
 
+For an external design review that assumes no prior project context, use [docs/design-review.md](docs/design-review.md).
+
 ## Commands
 
 ```text
