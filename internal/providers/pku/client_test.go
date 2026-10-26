@@ -133,7 +133,30 @@ func TestSafeTransportErrorDropsSignedURL(t *testing.T) {
 	}
 }
 
-func TestRestoreRefreshesAndPersistsState(t *testing.T) {
+func TestRestoreUsesSavedAccessTokenWithoutNetworkOrWrite(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Fatalf("Restore made an unexpected request to %s", r.URL.Path)
+	}))
+	defer server.Close()
+
+	writes := 0
+	auth, err := newAuthSession(server.URL, server.URL, func(_ context.Context, state State) error {
+		writes++
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer auth.Close()
+	if err := auth.Restore(context.Background(), State{AccessToken: "old-access", RefreshToken: "old-refresh"}); err != nil {
+		t.Fatal(err)
+	}
+	if auth.AccessToken() != "old-access" || writes != 0 {
+		t.Fatalf("token=%q writes=%d", auth.AccessToken(), writes)
+	}
+}
+
+func TestExplicitRefreshRotatesAndPersistsState(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/anyshare/oauth2/login/refreshToken" {
 			http.NotFound(w, r)
@@ -157,12 +180,15 @@ func TestRestoreRefreshesAndPersistsState(t *testing.T) {
 	if err := auth.Restore(context.Background(), State{AccessToken: "old-access", RefreshToken: "old-refresh"}); err != nil {
 		t.Fatal(err)
 	}
+	if err := auth.Refresh(context.Background(), "old-access"); err != nil {
+		t.Fatal(err)
+	}
 	if auth.AccessToken() != "new-access" || saved.AccessToken != "new-access" || saved.RefreshToken != "new-refresh" {
 		t.Fatalf("token=%q saved=%+v", auth.AccessToken(), saved)
 	}
 }
 
-func TestRestoreRejectsExpiredState(t *testing.T) {
+func TestRefreshRejectsExpiredState(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "expired", http.StatusUnauthorized)
 	}))
@@ -172,7 +198,10 @@ func TestRestoreRejectsExpiredState(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer auth.Close()
-	err = auth.Restore(context.Background(), State{AccessToken: "old-access", RefreshToken: "old-refresh"})
+	if err := auth.Restore(context.Background(), State{AccessToken: "old-access", RefreshToken: "old-refresh"}); err != nil {
+		t.Fatal(err)
+	}
+	err = auth.Refresh(context.Background(), "old-access")
 	if !errors.Is(err, ErrStateExpired) {
 		t.Fatalf("unexpected error: %v", err)
 	}

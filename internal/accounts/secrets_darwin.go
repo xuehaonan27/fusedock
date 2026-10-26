@@ -8,9 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"os"
 	"os/exec"
-	"path/filepath"
 	"strings"
 
 	"al.essio.dev/pkg/shellescape"
@@ -20,9 +18,9 @@ import (
 const keychainEncodingPrefix = "go-keyring-base64:"
 
 // macSecrets writes generic-password items through `security -i` so the
-// secret never appears in process arguments. Its ACL explicitly trusts the
-// installed FSKit executable, allowing the sandboxed extension to read and
-// rotate the same session without an interactive prompt.
+// secret never appears in process arguments. Only Apple's security tool is
+// trusted by the item ACL. The FSKit extension accesses provider data through
+// the broker and never reads this credential directly.
 type macSecrets struct{}
 
 func newSystemSecrets() Secrets { return macSecrets{} }
@@ -48,11 +46,14 @@ func (macSecrets) Get(service, user string) (string, error) {
 
 func (macSecrets) Set(service, user, secret string) error {
 	encoded := keychainEncodingPrefix + base64.StdEncoding.EncodeToString([]byte(secret))
-	command := fmt.Sprintf("add-generic-password -U -s %s -a %s -w %s -T %s",
-		shellescape.Quote(service), shellescape.Quote(user), shellescape.Quote(encoded),
-		shellescape.Quote("/usr/bin/security"))
-	for _, executable := range fsKitExecutables() {
-		command += " -T " + shellescape.Quote(executable)
+	command := fmt.Sprintf("add-generic-password -U -s %s -a %s -w %s",
+		shellescape.Quote(service), shellescape.Quote(user), shellescape.Quote(encoded))
+	exists, err := genericPasswordExists(service, user)
+	if err != nil {
+		return err
+	}
+	if !exists {
+		command += " -T " + shellescape.Quote("/usr/bin/security")
 	}
 	cmd := exec.Command("/usr/bin/security", "-i")
 	stdin, err := cmd.StdinPipe()
@@ -80,6 +81,17 @@ func (macSecrets) Set(service, user, secret string) error {
 	return nil
 }
 
+func genericPasswordExists(service, user string) (bool, error) {
+	out, err := exec.Command("/usr/bin/security", "find-generic-password", "-s", service, "-a", user).CombinedOutput()
+	if err == nil {
+		return true, nil
+	}
+	if strings.Contains(string(out), "could not be found") {
+		return false, nil
+	}
+	return false, fmt.Errorf("inspect system credential: %w", err)
+}
+
 func (macSecrets) Delete(service, user string) error {
 	out, err := exec.Command("/usr/bin/security", "delete-generic-password", "-s", service, "-a", user).CombinedOutput()
 	if err != nil {
@@ -89,16 +101,4 @@ func (macSecrets) Delete(service, user string) error {
 		return fmt.Errorf("delete system credential: %w", err)
 	}
 	return nil
-}
-
-func fsKitExecutables() []string {
-	var result []string
-	if override := strings.TrimSpace(os.Getenv("FUSEDOCK_FSKIT_EXECUTABLE")); override != "" {
-		result = append(result, override)
-	}
-	home, err := os.UserHomeDir()
-	if err == nil {
-		result = append(result, filepath.Join(home, "Applications", "FuseDock.app", "Contents", "Extensions", "FuseDockFSKit.appex", "Contents", "MacOS", "FuseDockFSKit"))
-	}
-	return result
 }

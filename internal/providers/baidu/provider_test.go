@@ -166,6 +166,40 @@ func TestOpenRefreshesExpiredState(t *testing.T) {
 	}
 }
 
+func TestOpenDoesNotRewriteUnchangedUsername(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/rest/2.0/xpan/file":
+			json.NewEncoder(w).Encode(map[string]any{"errno": 0, "list": []any{}})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+	state, _ := json.Marshal(savedState{
+		Version: stateVersion, APIEndpoint: server.URL, OAuthEndpoint: server.URL, AppKey: "app",
+		Username: "baidu-user", AccessToken: "access", RefreshToken: "refresh", ExpiresAt: time.Now().Add(time.Hour).Unix(),
+	})
+	writes := 0
+	session, err := (Factory{}).Open(context.Background(), provider.OpenRequest{
+		Username: "baidu-user",
+		Options:  map[string]string{"api_endpoint": server.URL, "oauth_endpoint": server.URL},
+		Secrets:  map[string][]byte{"app_key": []byte("app"), "secret_key": []byte("secret")},
+		State:    state,
+		SaveState: func(context.Context, []byte) error {
+			writes++
+			return nil
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer session.Close()
+	if writes != 0 {
+		t.Fatalf("opening an unchanged Baidu session wrote state %d times", writes)
+	}
+}
+
 func TestBaiduRejectsUntrustedEndpoint(t *testing.T) {
 	for _, endpoint := range []string{"http://pan.baidu.com", "https://user@pan.baidu.com", "https://pan.baidu.com/path"} {
 		if _, err := (Factory{}).Open(context.Background(), provider.OpenRequest{

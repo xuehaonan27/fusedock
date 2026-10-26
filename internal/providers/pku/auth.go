@@ -506,9 +506,9 @@ func (a *authSession) persist(ctx context.Context) error {
 	return nil
 }
 
-// Restore applies a saved session and validates its renewable token. A rejected
-// refresh token returns ErrStateExpired so the caller can fall back to password
-// login; transport failures remain distinct.
+// Restore applies a saved session without contacting the refresh endpoint.
+// Reads refresh lazily after an actual 401, which avoids rewriting the system
+// credential store on every CLI invocation or mount.
 func (a *authSession) Restore(ctx context.Context, state State) error {
 	a.mu.Lock()
 	defer a.mu.Unlock()
@@ -528,10 +528,6 @@ func (a *authSession) Restore(ctx context.Context, state State) error {
 	a.token = ""
 	if err := a.updateToken(); err != nil {
 		return ErrStateExpired
-	}
-	rejected := a.token
-	if err := a.refreshLocked(ctx, rejected); err != nil {
-		return err
 	}
 	return nil
 }

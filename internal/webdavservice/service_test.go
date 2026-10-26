@@ -75,6 +75,16 @@ func TestWebDAVReadOnlySurface(t *testing.T) {
 		t.Fatalf("DAV class = %q", response.Header.Get("DAV"))
 	}
 
+	request, _ = http.NewRequest("PROPFIND", server.URL+"/webdav/", strings.NewReader(`<?xml version="1.0"?><D:propfind xmlns:D="DAV:"><D:allprop/></D:propfind>`))
+	request.SetBasicAuth("fusedock", testToken)
+	request.Header.Set("Depth", "infinity")
+	request.Header.Set("Content-Type", "application/xml")
+	response = do(t, client, request)
+	response.Body.Close()
+	if response.StatusCode != http.StatusForbidden {
+		t.Fatalf("infinite PROPFIND status=%d, want 403", response.StatusCode)
+	}
+
 	request, _ = http.NewRequest(http.MethodPut, server.URL+"/webdav/new.txt", strings.NewReader("x"))
 	request.SetBasicAuth("fusedock", testToken)
 	response = do(t, client, request)

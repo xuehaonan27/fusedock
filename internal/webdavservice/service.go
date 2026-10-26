@@ -116,6 +116,10 @@ func (s *Service) serveHTTP(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "WebDAV access is read-only", http.StatusMethodNotAllowed)
 		return
 	}
+	if r.Method == "PROPFIND" && strings.EqualFold(strings.TrimSpace(r.Header.Get("Depth")), "infinity") {
+		http.Error(w, "WebDAV depth infinity is not supported", http.StatusForbidden)
+		return
+	}
 	s.handler.ServeHTTP(w, r)
 }
 

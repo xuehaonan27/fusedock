@@ -3,6 +3,7 @@
 package accounts
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -494,6 +495,9 @@ func (s *Store) SaveState(ctx context.Context, name, provider, username string, 
 		secret, err := s.readSecret(name)
 		if err != nil {
 			return err
+		}
+		if bytes.Equal(secret.State, state) {
+			return nil
 		}
 		secret.State = append(json.RawMessage(nil), state...)
 		return s.writeSecret(name, secret)

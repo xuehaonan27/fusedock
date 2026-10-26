@@ -136,6 +136,9 @@ func (c *client) currentToken() string {
 func (c *client) setUsername(ctx context.Context, username string) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	if c.username == username {
+		return nil
+	}
 	c.username = username
 	return c.persistLocked(ctx)
 }

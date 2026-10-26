@@ -12,6 +12,16 @@ import (
 
 type memorySecrets map[string]string
 
+type countingSecrets struct {
+	memorySecrets
+	sets int
+}
+
+func (s *countingSecrets) Set(service, user, secret string) error {
+	s.sets++
+	return s.memorySecrets.Set(service, user, secret)
+}
+
 func (m memorySecrets) Get(service, user string) (string, error) {
 	value, ok := m[service+"/"+user]
 	if !ok {
@@ -94,6 +104,27 @@ func TestSaveStateIsBoundToAccount(t *testing.T) {
 	}
 	if err := store.SaveState(ctx, "pku", "pku", "other", []byte(`{}`)); err == nil {
 		t.Fatal("state was saved for a mismatched username")
+	}
+}
+
+func TestSaveStateSkipsUnchangedCredentialWrite(t *testing.T) {
+	ctx := context.Background()
+	secrets := &countingSecrets{memorySecrets: memorySecrets{}}
+	store := &Store{Path: filepath.Join(t.TempDir(), "fusedock", "accounts.json"), Secrets: secrets}
+	account := Account{Name: "pku", Provider: "pku", Username: "student"}
+	if err := store.Add(ctx, account, map[string][]byte{"password": []byte("password")}, false, false); err != nil {
+		t.Fatal(err)
+	}
+	state := []byte(`{"token":"stable"}`)
+	if err := store.SaveState(ctx, "pku", "pku", "student", state); err != nil {
+		t.Fatal(err)
+	}
+	writes := secrets.sets
+	if err := store.SaveState(ctx, "pku", "pku", "student", state); err != nil {
+		t.Fatal(err)
+	}
+	if secrets.sets != writes {
+		t.Fatalf("unchanged state wrote the credential store %d extra times", secrets.sets-writes)
 	}
 }
 

@@ -12,7 +12,10 @@ extension FuseDockFSVolume: FSVolume.PathConfOperations {
 extension FuseDockFSVolume {
     var supportedVolumeCapabilities: FSVolume.SupportedCapabilities {
         let capabilities = FSVolume.SupportedCapabilities()
-        capabilities.supportsPersistentObjectIDs = true
+        // The provider contract currently guarantees IDs only for one mounted
+        // session. Flipping this on requires a daemon-owned durable mapping
+        // from every advertised ID back to a NodeKey after extension restart.
+        capabilities.supportsPersistentObjectIDs = false
         capabilities.supports64BitObjectIDs = true
         capabilities.supports2TBFiles = true
         capabilities.doesNotSupportVolumeSizes = true

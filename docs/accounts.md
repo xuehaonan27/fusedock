@@ -74,6 +74,8 @@ PKU persists its access and renewable refresh cookies as opaque provider state. 
 
 Expired state falls back to password login. Network failures do not silently fall back, because a password login would hit the same transport failure and could hide a credential problem. The account-store lock covers refresh and state writes across processes.
 
+Credential-store writes are now change-driven. PKU restores its saved access token without forcing a refresh, and refreshes only after an actual `401`; Baidu does not rewrite an unchanged username. The account store skips identical provider state. This prevents ordinary CLI commands and long-running brokers from repeatedly asking macOS to authorize Keychain updates. Tests that use real accounts must not persist refreshed state unless the test explicitly exercises credential rotation.
+
 The metadata file stores no secret. The OS credential store may still ask the user to unlock its keychain or desktop session; FuseDock cannot bypass that.
 
 ## FSKit broker
