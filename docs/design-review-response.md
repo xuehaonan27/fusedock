@@ -135,12 +135,27 @@ type ReadCapabilities interface {
 | 9 | macOS 默认按账户挂载 volume；aggregate 先用于 CLI/WebDAV。名称冲突拒绝，不做隐式转义。 |
 | 10 | 用显式 Kind/能力表达 Document、Shortcut、Export；不能伪装成未知大小的普通文件。 |
 
-## 非逐字采纳的部分
+## 条件采纳、暂缓验证与明确偏离
 
-- FUSE `st_ino = nodeid` 暂不作为契约。先把协议 nodeid、目录节点和 `st_ino` 的行为用 go-fuse 测试固定下来。
-- Baidu 小文件摘要缓存必须以其 XPAN MD5 的实测可靠性为前提；在此之前仍默认关闭。
-- 启动全量计算 payload hash 不作为默认方案；它会放大重启 I/O。header/大小启动检查加首次命中的 payload 校验更合适。
-- 持久缓存仍必须严格验证精确 revision；摘要只补强“provider 的版本令牌没有如实变化”这一故障，不改变读取绑定门槛。
+### 条件采纳
+
+- **Baidu 小文件整文件摘要缓存**：采纳机制，但启用前必须实测 XPAN MD5。评审的前提是“MD5 字段经实测可靠”；当前代码只证明 `dlink` 能被请求和 Range 能校验，未证明列表里的 MD5 始终对应当前下载内容。实测需覆盖另端修改、重命名、共享文件和云端特殊对象。未通过前不默认开启。
+- **条件 GET**：采纳，但只允许 strong ETag、每个请求携带 `If-Match`、响应 206/`Content-Range`/总大小/响应 ETag 全部校验，并实测服务器确实拒绝不匹配条件。把 200 全文或弱 ETag 当作成功的做法不采纳。
+- **不可变对象存储的响应版本校验**：可以作为精确 revision 的等价证明，但前提是对象存储保证 versionId 不可变且响应可绑定该版本；这不是普通可变后端的通用捷径。
+- **macOS 元数据索引保护**：采纳 `.metadata_never_index` 和拒绝 WebDAV `Depth: infinity`，但仍需实机验证 FSKit/Spotlight/QuickLook 是否遵守；未验证前把它当防护实验，而非已完成保证。
+
+### 暂缓验证
+
+- **FUSE `st_ino = nodeid`**：不把它直接写成跨平台契约。go-fuse 的协议 nodeid 与对外 `st_ino` 是不同层；采纳入的是“顺序分配、NodeKey 映射、不要 hash object ID”，具体是否相等由真实 go-fuse 测试决定。这样做是为了避免把库内部 ID 当成 POSIX inode 语义，尤其是在 readdir、getattr、lookup 和 future hard-link 场景。
+- **固定 30–60 秒 TTL**：采纳“不要固定 2 秒”的方向，但不在没有数据时换一个同样武断的数字。不同 provider 的限频、目录大小和 Finder 重列频率差异很大；先测量，再给默认值和显式 invalidate。
+- **FUSE/FSKit 持久映射**：暂缓到 daemon 能持久保存 NodeKey→平台 ID，并能从重启后收到的 ID 找回对象。只做 64-bit hash 再内存检测碰撞，不能声称 persistent ID。FSKit 现在先设为 false。
+- **启动时全量 payload 哈希**：评审实际建议的是启动扫 header/大小、首次命中校验 payload；我们按此采纳。若另指每次启动重算所有 payload，则不采纳，因为 10 GiB 缓存会造成无谓启动 I/O；首命中校验已经能在返回字节前发现损坏。
+
+### 明确偏离
+
+- **摘要作为持久缓存的唯一版本证明**：不采纳。下载后算摘要只能证明“这次下载的字节自洽”，除非 provider 把摘要和 requested revision 绑定；MD5 还缺少抗碰撞保证。摘要只作 byte-integrity / accidental-change 的第二道校验，不能替代每请求 revision binding。
+- **把 `ObjectID` 或显示路径作为缓存身份**：不采纳。两个账户可能返回相同 ObjectID；路径可改名。身份必须是完整 NodeKey，版本只在其上限定内容。
+- **让缓存失败影响有效远端读取**：不采纳。缓存是优化，写失败、损坏和预算不足都必须退化为 miss 或直接返回已下载字节。
 
 ## 新的验收顺序
 
