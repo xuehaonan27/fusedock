@@ -50,7 +50,7 @@ go run ./cmd/fusedock ls example --option endpoint=https://api.example
 
 Choose the contract version declared by the SDK. `ID` is the primary identity. Use the provider's stable file ID, not a display path. `ParentID` is useful for diagnostics and dependency caches but must not replace the full ID.
 
-`Version` drives cache correctness and future optimistic concurrency checks. Prefer an opaque revision, ETag, or content hash. When a provider lacks one, combine a stable modified timestamp with size and type; document the weaker guarantee.
+The current `Version` is a freshness hint and may be synthesized from a stable modified timestamp and size. It must not authorize persistent data caching. The target contract adds a strong `ContentVersion`, scoped to one account/provider/object ID, plus an optional `MetadataVersion`. Implement the optional revision interface so every remote request remains bound to the requested revision; absent that interface, the object remains current-revision-only. See [namespace-contract.md](namespace-contract.md) and [design-review-response.md](design-review-response.md).
 
 `List` must return only direct children and close every provider-level page. It should sort deterministically for stable presentation, although the driver does not require order. Do not resolve a child by concatenating an unchecked display path into an API URL.
 

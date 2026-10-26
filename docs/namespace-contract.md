@@ -9,7 +9,7 @@ FuseDock has three namespaces that must not be conflated:
 | Namespace | Answers | Stable identity |
 | --- | --- | --- |
 | Account | Which saved provider binding is this? | `AccountID` |
-| Remote object | Which provider object and revision? | `NodeKey` plus `Object.Version` |
+| Remote object | Which provider object and revision? | `NodeKey` plus `ObjectRevision` |
 | Surface path | How does this mount, WebDAV root, or CLI display it? | None; paths are presentation |
 
 The contract has four rules:
@@ -49,9 +49,9 @@ type NodeKey struct {
 }
 
 type ObjectRevision struct {
-    Node      NodeKey
-    Version   string
-    Size      int64
+    Node           NodeKey
+    ContentVersion string
+    Size           int64
 }
 
 type ResolvedObject struct {
@@ -76,28 +76,30 @@ Format and creation rules:
 - The account store is the only component allowed to allocate it. A caller cannot choose an ID.
 - It is an opaque identifier, not an authentication capability. Knowing an account ID grants no access.
 
-`AccountID` identifies a saved provider binding, not merely a row in a UI list. The binding consists initially of:
+`AccountID` identifies a saved provider binding, not merely a row in a UI list. Each provider declares the fields that affect remote identity. The initial binding is:
 
 ```text
-provider ID + endpoint + username + all provider options
+provider ID + normalized endpoint + remote principal + identity-affecting options
 ```
+
+The remote principal is preferably an OAuth issuer + stable subject/openid. Providers without one may fall back to username, with a weaker documented guarantee. A versioned, non-secret binding fingerprint is stored beside `AccountID`; it is checked at load time but does not participate in random ID generation.
 
 The following changes preserve the ID:
 
 - changing the alias;
 - changing whether the account is the default;
 - rotating a password, OAuth token, or saved provider session for the same binding;
-- replacing a credential with an equivalent one for the same provider, endpoint, username, and options;
+- replacing a credential with an equivalent one for the same binding;
 - restarting the daemon or application.
 
 The following changes require a new `AccountID`:
 
 - changing provider;
-- changing endpoint, username, or any provider option;
+- changing a declared binding field, including endpoint, remote principal, or identity-affecting option;
 - deleting an account and adding it again, even under the same alias;
 - changing credentials in a way that binds the alias to a different remote principal.
 
-The first implementation uses the conservative rule that all provider options are binding inputs. A provider may later declare a canonical binding fingerprint for options that do not affect remote identity, but accepting a false-positive rotation is safer than sharing data between two remote principals.
+The provider enumerates the fingerprint fields explicitly. Adding an unrelated presentation or tuning option must not rotate the account automatically. A fingerprint mismatch at load time is a fail-closed state: the account needs explicit reauthentication rather than silently reusing old node and cache identity.
 
 If an add-with-replace operation changes the binding, the store must allocate a new ID. It must not keep the old ID merely because the alias matches. Data, inode caches, and capabilities associated with the old ID become unreachable; cache reclamation is best effort.
 
@@ -108,7 +110,7 @@ The alias is the user-facing path component under an aggregate root. It is mutab
 - Aliases remain unique. Uniqueness is case-insensitive on every platform so `Work` and `work` cannot resolve differently on macOS and Linux.
 - An alias is a portable single path component: it contains no `/`, `\`, NUL or control characters, is not `.` or `..`, does not end in a dot or space, and is not a reserved Windows device name.
 - `.fusedock` and a `.fusedock-` prefix are reserved for FuseDock's virtual namespace.
-- An alias rename preserves `AccountID`. If credential storage is still addressed by alias, the rename must migrate the credential item atomically before publishing the new account record, or the operation must be rejected.
+- An alias rename preserves `AccountID`. Credential-store items are keyed by `AccountID`, so rename does not move secrets.
 - Account removal and re-creation under the same alias produce different IDs.
 
 The CLI may continue to accept aliases for convenience. Its JSON output and diagnostics should also expose the immutable ID. Automation that must survive a rename should use the ID.
@@ -120,9 +122,10 @@ Adding identity requires a versioned migration from the current config format.
 1. Acquire the exclusive account-store lock.
 2. Read and validate the old config without assigning temporary IDs.
 3. Validate aliases under the new portable and case-insensitive rules. Fail with an actionable conflict if existing aliases cannot be represented unambiguously.
-4. Generate one random ID per account with collision checks.
-5. Write a new config version using an owner-only temporary file, `fsync`, atomic rename, and directory sync.
-6. Release the lock only after the migrated record is durable.
+4. Generate one random ID per account with collision checks and compute the versioned binding fingerprint.
+5. Copy or rekey credential-store items from alias keys to `AccountID` keys idempotently; retain the old item until the move succeeds.
+6. Write a new config version using an owner-only temporary file, `fsync`, atomic rename, and directory sync.
+7. Release the lock only after the migrated record and credential lookup are durable.
 
 Migration must fail closed. A process must not proceed with ephemeral IDs that would change on the next start. The old config and credential-store entries remain readable if migration fails.
 
@@ -136,7 +139,7 @@ For `NodeRemote`, the provider must satisfy these rules:
 
 - `Object.ID` is non-empty and stable across provider session restarts while the account binding is unchanged.
 - The same provider object keeps its ID across display-name changes when the provider has a native stable ID.
-- An ID is never reused for different content with an unchanged `Version`.
+- An ID is never reused for different content with an unchanged `ContentVersion`.
 - An ID is unique within its account and provider namespace. It need not be globally unique.
 - `Object.ID` is opaque. The namespace layer does not parse a path, account alias, URI, or provider-specific structure out of it.
 - `Object.ParentID` names the parent object in the same provider session. It is not a local inode and may be empty only for the provider root.
@@ -146,19 +149,22 @@ The current provider comment guarantees an ID only for the lifetime of a session
 
 ### Revision rules
 
-`Object.Version` identifies the exact readable revision. For a file:
+`Object.ContentVersion` identifies the readable revision. For a file:
 
-- `Version` changes whenever the bytes available from `OpenRead` can change.
-- `OpenRead(ctx, object)` either serves that version or returns `provider.ErrConflict`.
+- Within the same `AccountID + ProviderID + ObjectID`, equal non-empty `ContentVersion` and equal size imply byte-identical content. Different objects may share a ContentVersion.
+- `ContentVersion` changes whenever the bytes available from any read can change.
+- `OpenRead(ctx, revision)` either serves that version or returns `provider.ErrConflict`.
 - It must never use the object ID to open the current remote file and attach an older version string to those bytes.
 - The returned range and total size must agree with `object.Size`.
-- A missing version is allowed for ordinary current-revision reads, but disables persistent caching for that object.
+- A missing ContentVersion is allowed for ordinary current-revision reads, but disables persistent caching for that object.
+
+Revision binding applies to **every remote request**, not only the initial open. Range GETs, redirects, signed-URL renewals, retries, and conditional metadata requests made by the Reader must use the same ContentVersion. Conditional range reads use `If-Match` with a strong validator; they do not use `If-Range` as the exact-version gate. Every response must validate status 206, `Content-Range`, full size, and response ETag. A server that ignores the condition, returns 200 full content, or returns a different version produces `ErrConflict`.
 
 If a caller has a stale object and the provider cannot retrieve that revision, it returns `ErrConflict`; it does not silently refresh and return different bytes. A higher layer may re-stat and retry before returning any bytes, but the retry must create a new `ObjectRevision`.
 
-Persistent caching is enabled only when the provider declares both durable object identity and revision-bound reads. The descriptor must make this a provider-level guarantee rather than an unsafe per-object guess. The contract needs a provider SDK revision and conformance tests before the cache is enabled.
+Persistent caching is enabled only when the provider declares durable object identity, a strong ContentVersion, per-request revision-bound reads, and reliable ranges. Factory declares an upper bound, session probing narrows it, and an object can opt out. Existing providers use optional capability interfaces; absence of a revision interface means no persistent cache. The contract needs conformance tests before the cache is enabled.
 
-PKU already binds `osdownload` to the requested `rev`. Baidu currently obtains a `dlink` without proving that it is tied to the metadata revision, so its persistent cache remains disabled even though its generated `Version` contains timestamp, size, and MD5.
+PKU already binds `osdownload` to the requested `rev`, but signed-URL renewal and online-edit paths still need explicit tests. Baidu currently obtains a `dlink` without proving that it is tied to the metadata revision, so its range cache remains disabled even though its generated version contains timestamp, size, and MD5. If that MD5 proves reliable in live tests, a whole-file entry below a small threshold may be downloaded fully, hashed, and cached only when the digest matches; this exception does not extend to ranges or larger files.
 
 ## Surface namespaces
 
@@ -182,12 +188,12 @@ type MountTarget struct {
 - A single-account mount exposes the selected provider root or scope at `/`.
 - An aggregate root exposes each saved account as `/<alias>`; the account directory is a synthetic `NodeAccount`, and descendants are remote nodes from that account's session.
 - Account aliases are the only first-level entries owned by the aggregate root. Provider IDs are not separate top-level directories, so two accounts using the same provider remain independent.
-- A scoped WebDAV or FSKit view uses the same rules below its selected root.
+- A scoped WebDAV or FSKit view uses the same rules below its selected root. An FSKit volume UUID is derived with UUIDv5 from a versioned encoding of AccountID and normalized scope; duplicate mounts of the same account + scope are rejected.
 - A mount configuration may have its own local mount identifier, but that identifier never becomes part of remote object identity or the data-cache key.
 
 Path resolution has two stages. First the surface selects the account binding; then the provider resolves the remaining components by listing and comparing validated names. A path is never concatenated into a provider API path and never substituted for an object ID.
 
-The result is a `ResolvedObject`. The local driver keeps its own node table and presentation attributes, but all provider reads use the resolved `NodeKey` and exact `Object.Version`.
+The result is a `ResolvedObject`. The local driver keeps its own node table and presentation attributes, but all provider reads use the resolved `NodeKey` and exact `ObjectRevision`.
 
 Paths are allowed to change. Renaming an account alias, reordering a mount list, or exposing the same account under a different scope does not change remote identity or cached bytes.
 
@@ -212,9 +218,9 @@ nodeEncoding =
   lengthPrefixed(objectID)
 ```
 
-The local adapter maps this encoding to its native identifier, for example by taking a stable hash into 64 bits. It must detect a collision within the mounted node table and return an error rather than aliasing two nodes. Zero remains invalid if the platform requires a nonzero root identifier.
+The encoding is a stable key, not a mandate to hash it into 64 bits. FUSE maintains a NodeKey-to-node map whose IDs are stable within a mount; protocol nodeid and user-visible `st_ino` are modeled separately until their relationship is verified. FSKit may use persistent identifiers only if the daemon maintains a durable NodeKey-to-identifier table and can resolve any returned persistent identifier. A hash plus an in-memory collision check is not a persistent lookup table.
 
-The current FUSE and FSKit code hashes only `Object.ID`. That is insufficient once two accounts can expose the same ID. It also means a provider object with the same ID in two mounts can produce colliding inode numbers. Both adapters must switch to `NodeKey` before aggregate mounts are enabled.
+The current FUSE and FSKit code hashes only `Object.ID`. That is insufficient once two accounts can expose the same ID. Before aggregate mounts, FUSE must use a namespaced node map and FSKit must either set `supportsPersistentObjectIDs = false` or implement the durable mapping described above.
 
 Version is deliberately absent from `NodeKey`: a content update changes the revision, not the object's identity. An account removal followed by a new account with the same alias produces a different node key.
 
@@ -234,7 +240,7 @@ blockKey = SHA-256(
   lengthPrefixed(accountID) ||
   lengthPrefixed(providerID) ||
   lengthPrefixed(objectID) ||
-  lengthPrefixed(version) ||
+  lengthPrefixed(contentVersion) ||
   uint64(fileSize) || uint64(offset) || uint64(length)
 )
 ```
@@ -268,21 +274,23 @@ The namespace implementation is not complete until these cases pass:
 - Alias uniqueness is case-insensitive and portable across Linux, macOS, and Windows.
 - Single-account and aggregate views resolve the same remote object to the same `NodeKey`.
 - A path rename changes presentation only; it never changes the cache key.
-- A changed object version cannot return old cached bytes, and an exact-version read failure returns `ErrConflict`.
+- A changed ContentVersion cannot return old cached bytes, and an exact-version read failure returns `ErrConflict`.
 - An empty version disables persistent caching for that object.
 - Provider short reads, wrong sizes, and revision mismatches never publish a cache entry.
 - FSKit and WebDAV use the same account namespace when exposing the same target.
 - A broker capability for one account cannot read an object from another account.
-- An inode-hash collision is detected rather than silently assigning one identifier to two nodes.
+- A node-map collision is detected rather than silently assigning one identifier to two nodes.
 
 ## Implementation order
 
-1. Add `AccountID`, versioned account-store migration, alias validation, and rotation rules.
-2. Revise and conformance-test provider stable-ID and revision-bound-read guarantees.
-3. Add a namespace resolver that scopes a provider session to an `AccountID` and returns `NodeKey` plus `ObjectRevision`.
-4. Replace bare-object inode derivation in FUSE and FSKit with node-key derivation.
-5. Bind broker and WebDAV capabilities to a single account target; add the aggregate root after the scoped path works.
-6. Add namespace-tagged cache directories, then implement the persistent block cache.
-7. Add writes only after object identity, revision conflicts, and recovery journals are tested.
+1. Immediately disable FSKit persistent object IDs and bound per-handle memory.
+2. Add `AccountID`, binding fingerprint, `AccountID`-keyed credentials, versioned account-store migration, alias validation, and rotation rules.
+3. Introduce a reconnectable daemon/UDS/XPC control plane before claiming persistent platform identity.
+4. Revise and conformance-test provider stable-ID and per-request revision-bound reads.
+5. Add a namespace resolver that scopes a provider session to an `AccountID` and returns `NodeKey` plus `ObjectRevision`.
+6. Replace bare-object identity in FUSE and FSKit with explicit NodeKey mapping; derive deterministic volume identity and test extension restart.
+7. Bind broker and WebDAV capabilities to a single account target; add the aggregate root after the scoped path works.
+8. Add namespace-tagged cache directories, then implement the persistent block cache after measured metadata/memory baselines.
+9. Add writes only after object identity, revision conflicts, and recovery journals are tested.
 
 The first implementation can keep the current one-account CLI and mount behavior. It should still introduce identity below the surfaces so that adding a second account does not require changing cache or inode semantics later.

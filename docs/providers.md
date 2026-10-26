@@ -16,7 +16,7 @@ FuseDock providers implement `pkg/provider`. A provider should be added only whe
 
 The PKU provider logs in through the university IAAA service and uses the AnyShare API exposed by the official client. The root lists accessible document libraries; descendants are ordinary directories and files.
 
-Object IDs are full `gns://` document IDs. Versions use AnyShare revision values. A cold byte-range read obtains a revision-specific signed object URL, sends one checked `Range` request, and rejects a mismatched total size or range. Signed URLs never appear in returned errors.
+Object IDs are full `gns://` document IDs. Versions use AnyShare revision values. A cold byte-range read obtains a revision-specific signed object URL, sends one checked `Range` request, and rejects a mismatched total size or range. Signed URLs never appear in returned errors. The revision must remain bound to every request, including renewals; online editing and rollback behavior still need live conformance tests before persistent range caching.
 
 The current provider is intentionally read-only. It does not use sharing, recycle-bin, upload, or fast-upload endpoints. Those can be added behind capability-gated interfaces rather than widening the read contract.
 
@@ -34,7 +34,7 @@ OAuth should use PKCE and the system browser. Tokens must be stored as secrets b
 
 ## Baidu NetDisk
 
-Baidu's provider uses official OAuth device authorization and XPAN APIs. It keeps `fs_id` object identity, handles paginated directory listings, and refreshes access tokens in the provider state. Signed download URLs are requested with bounded byte ranges and checked before bytes are returned; a server that ignores Range is reported as unsupported rather than producing incorrect data.
+Baidu's provider uses official OAuth device authorization and XPAN APIs. It keeps `fs_id` object identity, handles paginated directory listings, and refreshes access tokens in the provider state. Signed download URLs are requested with bounded byte ranges and checked before bytes are returned; a server that ignores Range is reported as unsupported rather than producing incorrect data. Its dlink path is not yet proven revision-bound, so range caching remains disabled. A small whole-file cache may be enabled only if live tests prove XPAN MD5 matches the downloaded bytes reliably.
 
 The read adapter should validate every returned path component, include stable file identity in cache keys, and keep signed URLs out of logs. Write support waits for the shared conflict and recovery contract.
 

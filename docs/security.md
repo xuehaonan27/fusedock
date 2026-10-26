@@ -58,7 +58,7 @@ credential store
 - Basic authentication is accepted for native WebDAV clients; Bearer authentication is accepted for browser clients. All writes and LOCK/UNLOCK are rejected, and DAV class 1 advertises the read-only behavior.
 - An unknown `Origin` or a browser `Sec-Fetch-Site: cross-site` request is rejected. Wildcard CORS is not supported. A configured browser origin receives only `GET`, `HEAD`, `PROPFIND`, and `OPTIONS`; other responses use `Cross-Origin-Resource-Policy: same-origin`.
 - The broker binds the WebDAV handler and FSKit protocol to the same loopback listener and exact Host value. It cannot be switched to a LAN interface through a CLI flag.
-- ETags derive from provider object ID/version, not from a mutable path name. Range reads are validated by the provider before HTTP content serving.
+- Current ETags derive from provider object ID/version, not from a mutable path name, but the existing Version is only a freshness hint. The target contract exposes a strong ETag only for a strong ContentVersion; weak or synthetic metadata values must not be advertised as byte-identity proof. Range reads are validated by the provider before HTTP content serving.
 
 ## Residual risk
 
@@ -66,6 +66,10 @@ The operating system does not provide a portable way to prove over loopback TCP 
 
 This is a same-user capability, not an elevation to another user. It still increases exposure compared with no listener, because a process that can read the file needs no additional authentication prompt. The one-use claim, in-memory session token, read-only protocol, broker lifetime, and file deletion limit the window.
 
+The one-use file also has a lifecycle gap: the system can terminate and relaunch the FSKit extension. A claimed token then disappears with the old extension process, while the mount resource still needs data. The planned fix is not another longer-lived file token. The daemon and extension must use a UDS/XPC control channel with peer identity and code-signing checks, allowing the extension to reconnect after relaunch. Until that exists, restart behavior remains a known availability limitation rather than a solved property of the broker.
+
 For release hardening, the next broker transport should be a Unix domain socket or XPC service with peer code-signing checks, plus a launchd-managed broker lifecycle. The current loopback protocol remains useful because FSKit's extension sandbox and Go bridge can use it without weakening the Keychain ACL or embedding credentials.
+
+The persistent cache planned in [persistent-block-cache.md](persistent-block-cache.md) stores plaintext file payloads under an owner-only directory. Its threat model is comparable to an owner-only browser cache or the OS page cache: it does not protect data from a malicious process running as the same operating-system user. Per-account disablement will be available; encryption whose key is also available to the same user would not change that threat boundary.
 
 This review does not claim zero additional attack surface. It establishes that the broker does not cross the account or OS-user boundary and that its new capability is read-only and short-lived.

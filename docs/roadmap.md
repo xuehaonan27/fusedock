@@ -15,8 +15,12 @@ The ordering is based on validating core contracts before multiplying surfaces a
 
 ## Next: productionize the read path
 
+- Correct the version contract, bound memory, and stop claiming FSKit persistent IDs prematurely.
+- Add immutable AccountID, binding fingerprints, and account-ID-keyed credentials.
+- Add a supervised daemon and a reconnectable, peer-authenticated control/data plane.
+- Prove per-request revision binding and establish metadata, Finder, QuickLook, and range baselines.
 - Run native FUSE acceptance on Linux and FSKit mount acceptance on macOS.
-- Add bounded disk cache keyed by account, object ID, version, and range.
+- Add a bounded disk cache keyed by account, object ID, content version, and range.
 - Add a multi-account virtual root.
 - Add mount supervision and clean diagnostics for stale sessions.
 - Add opt-in PKU live acceptance with a dedicated test account.

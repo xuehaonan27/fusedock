@@ -90,7 +90,8 @@ Check that the broker terminal is still running, then reconnect using the curren
 
 - `GET`/`HEAD` support byte ranges through Go's HTTP content server and the provider's `ReadAt` implementation.
 - `PROPFIND` reports files and collections with size, modification time, resource type, and a version-based ETag.
-- `ETag` is derived from the provider object ID and version; an unchanged object has a stable tag.
+- The current `ETag` is derived from provider object ID and the weak `Version` hint. It must not be treated as proof of byte-identical content. The target contract emits a strong ETag only for a strong ContentVersion; otherwise it emits a weak ETag or omits it.
+- `PROPFIND` with `Depth: infinity` is rejected so Finder and third-party clients cannot trigger an unbounded tree walk.
 - WebDAV paths are presentation paths. Object identity remains the provider's stable object ID.
 - The current surface is read-only. `PUT`, `POST`, `DELETE`, `MKCOL`, `COPY`, `MOVE`, `PROPPATCH`, `LOCK`, and `UNLOCK` are rejected before reaching the file system.
 - The token is process-scoped and read-only. Restarting the broker generates a new token; clients must reconnect.

@@ -47,7 +47,7 @@ For direct Linux FUSE mounts before fusedockd exists, the mount process may own 
 A block key has these logical parts:
 
 ~~~
-account ID + provider ID + object ID + object version
+account ID + provider ID + object ID + content version
            + file size + block offset/length
 ~~~
 
@@ -67,7 +67,7 @@ keyHash = SHA-256(
   len(accountID) || accountID ||
   len(providerID) || providerID ||
   len(objectID) || objectID ||
-  len(version) || version ||
+  len(contentVersion) || contentVersion ||
   uint64(fileSize) || uint64(blockOffset) || uint64(blockLength)
 )
 ~~~
@@ -76,13 +76,15 @@ Length prefixes avoid ambiguity when an object ID contains delimiters. Integers 
 
 ### Version requirements
 
-A disk hit is allowed only when the caller already has an Object with the same version used in the key. A changed version chooses a different hash; old blocks become unreachable and are evicted by normal LRU.
+A disk hit is allowed only when the caller already has an ObjectRevision with the same ContentVersion used in the key. A changed version chooses a different hash; old blocks become unreachable and are evicted by normal LRU. Equal ContentVersion is meaningful only within one account/provider/object ID: two objects may legitimately share a token, but the full key keeps their bytes separate.
 
 This does not make stale metadata disappear. The metadata TTL still controls how long the system may report an older Object. For read-only mounts, serving a previously selected revision during that bounded TTL is acceptable. If stronger freshness is required, the mount should revalidate the file with Stat before opening it after the TTL expires.
 
-More importantly, OpenRead(object) must return the revision described by object.Version. A provider that ignores the supplied object and downloads the current remote file can poison a cache entry. PKU already obtains a revision-bound signed request. Baidu's current dlink path does not yet prove that the returned bytes are tied to the metadata version, so Baidu persistent caching must remain disabled until it performs a version check before the fill, or binds the download to a revision.
+More importantly, **every remote request** must remain bound to the requested ContentVersion, not only the initial OpenRead. A reader can issue several range GETs, renew signed URLs, follow redirects, and retry; all of them must use the same revision and validate the response. For conditional GET, use `If-Match` with a strong validator, not `If-Range` as the version gate. Validate status 206, `Content-Range`, total size, and response ETag on every response. A 200 full response, ignored condition, mismatched ETag, or disappeared revision becomes `ErrConflict`.
 
-If Version is empty, persistent caching is disabled for that object by default. An optional local-only fallback may use a metadata fingerprint, but it must be explicitly configured and documented as weaker.
+PKU already signs `osdownload` with the requested `rev`, but its renewal and online-edit paths need tests. Baidu's current dlink path does not yet prove that returned bytes are tied to the metadata version, so Baidu range caching must remain disabled. If XPAN MD5 proves reliable, a file no larger than the whole-file threshold may be downloaded completely, hashed, and cached only when that digest matches metadata; this exception must not be generalized to ranges or larger files. MD5 is an accidental-change/compatibility check, not a security guarantee.
+
+If ContentVersion is empty or the provider lacks per-request revision binding, persistent caching is disabled for that object by default. There is no metadata-fingerprint fallback in the persistent data cache; a weak fingerprint may only drive short-lived metadata caching.
 
 ## Storage layout
 
@@ -98,7 +100,7 @@ Default roots:
 blocks/v1/
   owner.lock
   tmp/
-  entries/<namespaceTag>/<keyHash>.blk
+  entries/<namespaceTag>/<keyHash[:2]>/<keyHash>.blk
 ~~~
 
 The namespace-tagged directory is derived only from opaque IDs, allowing per-account accounting and clearing without exposing an alias or remote name. The root is private (0700 on Unix). Block files are regular files created with 0600, inside an opened root that rejects symlinks and path traversal. Windows requires a protected current-user ACL and reparse-point rejection before this feature is enabled.
@@ -115,7 +117,7 @@ payload hash    32 bytes   SHA-256 of payload bytes
 payload         N bytes
 ~~~
 
-A file name is the hexadecimal key hash plus .blk. The in-memory index is rebuilt by scanning entries at daemon startup. A cache size of 10 GiB with 4 MiB blocks is roughly 2,560 full-size files, so a scan is practical and avoids adding a database dependency for the first implementation. If the cache later contains millions of tiny entries, a pure-Go transactional index such as bbolt may replace the scan.
+A file name is the hexadecimal key hash plus .blk. The filesystem directory is the initial index; no bbolt database is required. Startup scans headers and file sizes in the background to establish budget and LRU order. Until that scan completes, new persistent writes are blocked or treated as an already-full budget. Payload hashes are verified on first access in each process and cached in-memory as verified, rather than hashing every small read.
 
 ## Read plan
 
@@ -128,7 +130,9 @@ Defaults for the first implementation:
 | read-ahead | one block | No speculative multi-block fetch initially |
 | fill-concurrency | 4 | Maximum simultaneous provider block fills |
 | cache-limit | 10 GiB | Disk budget for cached payloads |
-| metadata-ttl | 2 s | Existing metadata freshness window |
+| metadata-ttl | measured per provider | Remote providers should not inherit the current fixed 2 s default; establish the value from Finder relist and provider rate-limit measurements |
+
+The block, whole-file, read-ahead, and TTL values are provisional until baseline measurements cover PKU/Baidu latency, Finder relist calls, QuickLook behavior, and range throughput.
 
 For a file at or below whole-file, the first read can fill the whole file as one cache entry. For a larger file, reads are aligned to block-size; the final block is shortened to the remaining file length. A read spanning two blocks is served in order in the first implementation. Parallel block prefetch is a measured optimization, not a correctness requirement.
 
@@ -143,12 +147,12 @@ driver ReadAt
    -> validate offset/length against Object.Size
    -> compute block key
    -> lookup in-memory index
-       hit: open/read local block, verify once, return bytes
+       hit: open/read local block; verify payload once per process, then return bytes
        miss: join or create one in-flight fill
    -> fill full aligned range from provider
    -> validate exact byte count and file size
-   -> write temp file, fsync, rename into entries/
-   -> fsync directory
+   -> write complete temp file, close, atomically rename into entries/
+   -> optional conservative fsync mode
    -> return requested bytes
 ~~~
 
@@ -156,7 +160,7 @@ Only one fill may exist per block key. The fill owns its context rather than bor
 
 The fill result is published only after the exact expected size is received. A short read, extra bytes, mismatched size, or provider cancellation removes the temporary file and returns an error; it never leaves a partial file under a valid cache name.
 
-If the cache cannot write because of permission, disk pressure, or a full budget with every block pinned, a successfully downloaded block is returned to the caller and simply not retained. A cache write failure must not fail an otherwise valid read.
+If the cache cannot write because of permission, disk pressure, or a full budget with every block pinned, a successfully downloaded block is returned to the caller and simply not retained. A cache write failure must not fail an otherwise valid read. The default path does not fsync every block or directory: cache data is disposable, and a torn file left by a crash is detected by its header/payload hash and removed. A conservative fsync mode remains available for deployments that prefer reduced torn-file frequency over write amplification.
 
 ## Index, LRU, and eviction
 
@@ -172,8 +176,9 @@ keyHash -> path, payload length, file size, lastAccess, refCount, verified
 - Eviction removes the oldest clean, unpinned entries until the new block fits.
 - An entry with live readers is pinned. On Unix, unlinking an open file may be safe; on Windows, deletion is deferred until the last handle closes.
 - Version changes create new keys. Old-version entries are not eagerly deleted; LRU eventually removes them.
-- Startup removes stale temporary files and deletes malformed or size-mismatched entries. A complete file is verified against its payload hash once per process before its first hit.
+- Startup removes stale temporary files, validates headers and sizes, and rebuilds budget/LRU in the background. A complete payload is verified against its hash once per process before its first hit.
 - On corruption, delete the entry and perform a normal provider fill in the same request. Never return bytes from a corrupt cache file.
+- The LRU order can be recovered from block mtime; successful hits touch it in batches rather than updating metadata on every driver read.
 
 If a block is larger than the configured budget, bypass persistence. A single account's activity must not be able to evict every block from another active account indefinitely; a later fairness policy can reserve or weight a share per account. The first version should expose per-account usage so this can be evaluated with real workloads.
 
@@ -218,11 +223,13 @@ File payloads can be highly sensitive even though credentials are not stored her
 - Cache root is private; files and temporary writes are owner-only.
 - Object names and IDs never appear in paths or filenames.
 - Remote names remain only in the in-memory metadata cache, not the disk data index.
+- Block files are opened relative to a confined root with no-follow semantics and verified with fstat after opening; do not lstat and then reopen by a race-prone path.
 - The cache contains plaintext payloads by default. Users who need encrypted-at-rest data should use full-disk encryption; optional per-cache encryption is a later feature.
 - cache clear removes references and files, but cannot guarantee physical erasure on SSDs or backed-up filesystems.
 - A symlink, hard-link, reparse point, or changed file size in an entry path is treated as corruption; the entry is removed.
 - No signed URL, token, password, OAuth code, or HTTP header is stored in a block file.
 - Cache-disk exhaustion is a cache miss, not a successful persistence guarantee and not a reason to corrupt an application read.
+- Persistent block caching can be disabled per account. The threat model treats the cache as equivalent to an owner-only browser cache or OS page cache; it does not protect from a malicious process running as the same OS user.
 
 ## Observability
 
@@ -245,7 +252,7 @@ All cache logs should use key hashes and sizes, not remote file names, object ID
 Required unit and integration coverage:
 
 - cold fill, warm hit, and hit after a simulated process restart;
-- object version change gives a different key and never returns old bytes;
+- ContentVersion change gives a different key and never returns old bytes;
 - account ID change or recreated account isolates cache namespaces;
 - empty version bypasses persistence;
 - reads spanning block boundaries and the final short block;
@@ -254,7 +261,10 @@ Required unit and integration coverage:
 - one waiter cancelling does not abort a useful shared fill;
 - all waiters cancelling cancels unused work;
 - fill concurrency limit, provider short reads, oversized responses, and context cancellation;
+- every remote request in a multi-request reader remains bound to one revision, including URL renewal, redirects, retries, and conditional range GETs;
+- conditional GET returning 200, a bad `Content-Range`, or a mismatched response ETag fails before publishing bytes;
 - interrupted temporary writes and startup orphan cleanup;
+- crash/torn files survive rename without fsync and are rejected by verification;
 - corrupt header, corrupt payload, wrong file length, symlink, and permission errors;
 - LRU eviction, pinned readers, Windows deferred deletion, and disk-full behavior;
 - FSKit and WebDAV reading the same warm block without a second provider call;
@@ -265,20 +275,23 @@ Acceptance for enabling it by default:
 1. A 10 GiB cache remains under its configured budget during mixed small/large reads.
 2. The same unchanged file reopened after daemon restart produces zero provider data calls for cached ranges.
 3. A changed provider version produces zero bytes from the previous version.
-4. FSKit and WebDAV share one warm fill in the same broker process.
+4. FSKit and WebDAV share one warm fill in the same daemon process.
 5. Cache corruption is detected and repaired by a remote refill.
 6. Cold and warm path benchmarks show a measurable improvement without unacceptable memory growth or lock contention.
+7. Finder/Spotlight/QuickLook do not trigger an unintended full-tree download; disk and in-memory budgets remain inside their configured limits.
 
 ## Rollout sequence
 
-1. Implement the namespace contract, including stable account IDs and version-bound provider conformance tests.
-2. Add the cache package with an in-memory index and no integration; exercise it against local fixtures only.
-3. Publish and validate block files atomically; add restart, corruption, and eviction tests.
-4. Wire one cached VFS session into both FSKit and WebDAV in the broker process.
-5. Disable duplicate handle-block caches in the extension where the shared broker cache already covers the data.
-6. Add cache diagnostics and an opt-in configuration.
-7. Run native PKU and Baidu read acceptance, with Baidu persistence disabled until revision binding is fixed.
-8. Enable a conservative default after cold/warm and soak measurements.
+1. Correct the ContentVersion scope, define per-request revision binding, and add immediate memory/metadata guardrails.
+2. Implement account identity, reconnectable daemon/UDS/XPC control plane, and binary data surface.
+3. Complete provider capability conformance and establish latency, relist, QuickLook, and range baselines.
+4. Add the cache package with an in-memory index and no integration; exercise it against local fixtures only.
+5. Publish and validate block files atomically; add restart, corruption, torn-file, budget, and eviction tests.
+6. Wire one cached VFS session into both FSKit and WebDAV in the daemon.
+7. Disable duplicate handle-block caches where the shared daemon cache covers the data.
+8. Add cache diagnostics, per-account disablement, and an opt-in configuration.
+9. Run native PKU read acceptance and only the proven Baidu whole-file digest path.
+10. Enable a conservative default after cold/warm, Finder, and soak measurements.
 
 ## Explicit first-version limits
 

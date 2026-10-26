@@ -61,6 +61,8 @@ bin/fusedock broker start --account pku \
 
 The generated file contains a loopback endpoint and a one-use capability, not a password. The extension claims it once and keeps only an in-memory session capability. The file is removed immediately after the claim. Mount from another terminal:
 
+This is the current implementation, not the final lifecycle model. If macOS restarts the extension, its in-memory capability is gone and the one-use mount resource cannot be claimed again. The planned launchd-managed daemon and peer-authenticated UDS/XPC channel will let the extension reconnect without the CLI being present.
+
 ```sh
 mkdir -p "$HOME/FuseDockPKU"
 mount -t fusedock \

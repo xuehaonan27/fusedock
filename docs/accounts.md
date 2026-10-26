@@ -16,7 +16,7 @@ Linux:   ~/.config/fusedock/accounts.json
 Windows: %AppData%\fusedock\accounts.json
 ```
 
-Secret items use the service name `dev.fusedock.accounts` and the local account name as their key. The payload is versioned JSON containing provider-defined secret keys, such as a password or OAuth token, plus an opaque provider state value. FuseDock rejects account-store files with group or world permissions on Unix.
+The current v1 implementation uses `dev.fusedock.accounts` with the local account name as the credential-item key. The target v2 format adds an immutable random `AccountID` and a versioned binding fingerprint, and keys credential items by `AccountID`; migration must be atomic and idempotent. The payload is versioned JSON containing provider-defined secret keys, such as a password or OAuth token, plus an opaque provider state value. FuseDock rejects account-store files with group or world permissions on Unix.
 
 ## Add an account
 
@@ -86,6 +86,8 @@ bin/fusedock broker start --account pku \
 ```
 
 The broker opens the saved account in the CLI process and serves only read-only object metadata and byte ranges. It writes an owner-only, one-use bootstrap capability. On mount, the extension exchanges it for an in-memory session capability; account passwords and refresh tokens never enter the extension. The bootstrap file is removed immediately after the claim and again when the broker exits. Keep the broker running while the FSKit mount is active.
+
+This one-use model is a current limitation: if macOS restarts the extension, the in-memory token is lost and the same bootstrap resource cannot be reused. The planned daemon/UDS/XPC control plane authenticates the extension on reconnect and avoids requiring the CLI to remain present. Until that lands, restarting an extension may require a new mount/capability flow.
 
 The [security review](security.md) covers loopback binding, Origin/Host checks, proxy/redirect rejection, request limits, replay behavior, and residual same-user risk. The direct credential-file path remains as a development fallback, but it is no longer the recommended FSKit flow.
 

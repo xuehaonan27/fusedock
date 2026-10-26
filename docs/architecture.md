@@ -43,7 +43,7 @@ A `provider.Session` represents one authenticated account and one namespace.
 
 1. `Root` returns a directory object and does not perform a vendor-specific path lookup.
 2. Every object ID is non-empty and unique within its account/provider namespace. Durable inode and data caching require it to remain stable across session restarts for the same account binding.
-3. `Version` changes whenever file content or relevant metadata changes. Providers that do not have a native revision should synthesize one from a stable timestamp and size.
+3. The current `Version` field changes whenever file content or relevant metadata changes. Providers without a native revision synthesize one from timestamp and size. This is only a freshness hint. The target contract splits strong `ContentVersion` from optional `MetadataVersion`; a synthesized value can never authorize a persistent data-cache hit.
 4. Every child's `Name` is a single path component. `/`, `\`, NUL, `.` and `..` are invalid. Duplicate names in one listing are an error.
 5. `List` returns a complete snapshot for one directory. Provider pagination stays inside the adapter.
 6. `OpenRead` returns a handle whose `ReadAt` accepts the caller's context on every call. It must not retain the open call's context.
@@ -54,13 +54,15 @@ Names are presentation values. The driver may cache or revalidate attributes, bu
 
 Common errors (`ErrNotFound`, `ErrPermission`, `ErrConflict`, and others) are translated once by the driver. Vendor HTTP codes and signed URLs never become FUSE errno values directly.
 
+The 2026-10-26 review corrected an important scope: within one account/provider/object ID, equal strong ContentVersion means equal size and bytes; different objects may share a version token. Revision binding applies to every remote request, including URL renewal and retries, not only the initial open. See [design-review-response.md](design-review-response.md).
+
 ## Read path
 
 The metadata cache stores short-lived directory snapshots and attributes. Concurrent requests for the same directory share one provider request, and the waiting caller can cancel without cancelling a useful request for another caller.
 
-An open file has one read handle. The VFS layer turns driver-size reads into 4 MiB aligned provider ranges and retains the most recently loaded block per handle. This removes repeated authentication and signed-URL work for ordinary sequential reads. It is an in-memory per-handle cache, not a durable disk cache.
+An open file has one read handle. The VFS layer turns driver-size reads into 4 MiB aligned provider ranges and retains the most recently loaded block per handle. This removes repeated authentication and signed-URL work for ordinary sequential reads. It is an in-memory per-handle cache, not a durable disk cache. The current storage is unbounded when many handles exist; it must move behind a configurable global memory budget before persistent caching or large Finder workloads.
 
-The proposed persistent block cache is specified in [persistent-block-cache.md](persistent-block-cache.md). It requires one cache owner in the broker/daemon, a stable account ID in the key, and a provider guarantee that an OpenRead serves the requested object version. It must not be enabled for Baidu until its download path is revision-bound.
+The proposed persistent block cache is specified in [persistent-block-cache.md](persistent-block-cache.md). It requires one cache owner in the broker/daemon, a stable account ID in the key, a strong ContentVersion, and a provider guarantee that every remote request serves the requested revision. It must not be enabled for Baidu range reads until that path is revision-bound.
 
 PKU performs two requests for a cold range: `osdownload` obtains a signed object request, and the object storage returns that exact byte range. The adapter verifies `Content-Range` and the selected revision size before exposing bytes. Signed URLs and their query strings are omitted from errors.
 
@@ -73,12 +75,12 @@ The identity model is specified in [namespace-contract.md](namespace-contract.md
 The eventual cache key must include:
 
 ```text
-account ID + provider ID + object ID + version + file size + byte range
+account ID + provider ID + object ID + content version + file size + byte range
 ```
 
 The current release mounts one session per mount point, so the account dimension is implicit. Multi-account mounts will add a virtual first-level account directory and scope IDs before they reach a provider. A shared library must not be confused with a local copy merely because two accounts can see the same name. A bare `Object.ID` is not sufficient for an inode or cache key once two accounts can expose the same vendor ID.
 
-The read cache is not a synchronization cache. A changed version causes a new range; it does not merge local and remote contents.
+The read cache is not a synchronization cache. A changed version causes a new range; it does not merge local and remote contents. A cache hit is valid only after the caller has resolved an ObjectRevision from a trusted session.
 
 ## Writes and conflict handling
 

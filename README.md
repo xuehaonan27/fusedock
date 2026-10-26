@@ -145,6 +145,8 @@ The account, object, surface-path, inode, and cache identity rules are specified
 
 For an external design review that assumes no prior project context, use [docs/design-review.md](docs/design-review.md).
 
+The 2026-10-26 review disposition and revised implementation order are in [docs/design-review-response.md](docs/design-review-response.md).
+
 ## Commands
 
 ```text
