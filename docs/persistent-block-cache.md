@@ -80,11 +80,13 @@ A disk hit is allowed only when the caller already has an ObjectRevision with th
 
 This does not make stale metadata disappear. The metadata TTL still controls how long the system may report an older Object. For read-only mounts, serving a previously selected revision during that bounded TTL is acceptable. If stronger freshness is required, the mount should revalidate the file with Stat before opening it after the TTL expires.
 
-More importantly, **every remote request** must remain bound to the requested ContentVersion, not only the initial OpenRead. A reader can issue several range GETs, renew signed URLs, follow redirects, and retry; all of them must use the same revision and validate the response. For conditional GET, use `If-Match` with a strong validator, not `If-Range` as the version gate. Validate status 206, `Content-Range`, total size, and response ETag on every response. A 200 full response, ignored condition, mismatched ETag, or disappeared revision becomes `ErrConflict`.
+For a range reader, **every remote request** must remain bound to the requested ContentVersion, not only the initial OpenRead. A reader can issue several range GETs, renew signed URLs, follow redirects, and retry; all of them must use the same revision and validate the response. For conditional GET, use `If-Match` with a strong validator, not `If-Range` as the version gate. Validate status 206, `Content-Range`, total size, and response ETag on every response. A 200 full response, ignored condition, mismatched ETag, or disappeared revision becomes `ErrConflict`.
 
 PKU already signs `osdownload` with the requested `rev`, but its renewal and online-edit paths need tests. Baidu's current dlink path does not yet prove that returned bytes are tied to the metadata version, so Baidu range caching must remain disabled. If XPAN MD5 proves reliable, a file no larger than the whole-file threshold may be downloaded completely, hashed, and cached only when that digest matches metadata; this exception must not be generalized to ranges or larger files. MD5 is an accidental-change/compatibility check, not a security guarantee.
 
-If ContentVersion is empty or the provider lacks per-request revision binding, persistent caching is disabled for that object by default. There is no metadata-fingerprint fallback in the persistent data cache; a weak fingerprint may only drive short-lived metadata caching.
+The whole-file exception has five rules: the digest must come from provider metadata and be embedded in ContentVersion; it must be compared with the digest saved in the snapshot used by `OpenRead`, not a fresh Stat after download; only a complete-object fill can use it; a mismatch returns `ErrConflict` and publishes nothing; and the provider's digest semantics must first pass modification, duplicate-content, and concurrent-change tests. A locally computed digest is never sufficient by itself. This verifies that the downloaded bytes equal the provider's declaration for the selected content; it does not require discovering a server-side revision identifier and is not a substitute for expected-version writes.
+
+If ContentVersion is empty, persistent caching is disabled for that object. If a provider lacks per-request revision binding, range caching is disabled, but a whole-file entry may still qualify through the five-rule declared-digest path. There is no unauthored metadata-fingerprint fallback in the persistent data cache; a weak fingerprint may only drive short-lived metadata caching.
 
 ## Storage layout
 
@@ -117,7 +119,7 @@ payload hash    32 bytes   SHA-256 of payload bytes
 payload         N bytes
 ~~~
 
-A file name is the hexadecimal key hash plus .blk. The filesystem directory is the initial index; no bbolt database is required. Startup scans headers and file sizes in the background to establish budget and LRU order. Until that scan completes, new persistent writes are blocked or treated as an already-full budget. Payload hashes are verified on first access in each process and cached in-memory as verified, rather than hashing every small read.
+A file name is the hexadecimal key hash plus .blk. The filesystem directory is the initial index; no bbolt database is required. Startup only needs file stat (size and mtime) to establish budget and LRU order. Header and payload validation can be deferred until first access, so mounting does not wait for a full header scan. Until enough metadata is available, new persistent writes are blocked or treated as an already-full budget. Header and payload hashes are verified on first access in each process and cached in-memory as verified, rather than hashing every small read.
 
 ## Read plan
 
@@ -134,7 +136,7 @@ Defaults for the first implementation:
 
 The block, whole-file, read-ahead, and TTL values are provisional until baseline measurements cover PKU/Baidu latency, Finder relist calls, QuickLook behavior, and range throughput.
 
-For a file at or below whole-file, the first read can fill the whole file as one cache entry. For a larger file, reads are aligned to block-size; the final block is shortened to the remaining file length. A read spanning two blocks is served in order in the first implementation. Parallel block prefetch is a measured optimization, not a correctness requirement.
+For a file at or below whole-file, the first read can fill the whole file as one cache entry when it has exact revision binding or a declared digest that matches the OpenRead snapshot. A weaker provider without either proof falls back to ordinary uncached reads (or eligible range caching where that is independently proven). For a larger file, reads are aligned to block-size; the final block is shortened to the remaining file length. A read spanning two blocks is served in order in the first implementation. Parallel block prefetch is a measured optimization, not a correctness requirement.
 
 On every lookup, check the whole-file key first, then the aligned block key. If a complete file would exceed the disk budget or whole-file caching is disabled, fall back to aligned blocks. Never allocate a whole-file entry merely because a small read happened to touch a large file.
 
@@ -176,7 +178,7 @@ keyHash -> path, payload length, file size, lastAccess, refCount, verified
 - Eviction removes the oldest clean, unpinned entries until the new block fits.
 - An entry with live readers is pinned. On Unix, unlinking an open file may be safe; on Windows, deletion is deferred until the last handle closes.
 - Version changes create new keys. Old-version entries are not eagerly deleted; LRU eventually removes them.
-- Startup removes stale temporary files, validates headers and sizes, and rebuilds budget/LRU in the background. A complete payload is verified against its hash once per process before its first hit.
+- Startup removes stale temporary files and rebuilds budget/LRU from file size and mtime in the background. Header and payload validation are deferred to first hit, where a complete entry is verified once in the process before any cached bytes are returned. A torn or malformed entry is removed and refilled.
 - On corruption, delete the entry and perform a normal provider fill in the same request. Never return bytes from a corrupt cache file.
 - The LRU order can be recovered from block mtime; successful hits touch it in batches rather than updating metadata on every driver read.
 
@@ -261,7 +263,9 @@ Required unit and integration coverage:
 - one waiter cancelling does not abort a useful shared fill;
 - all waiters cancelling cancels unused work;
 - fill concurrency limit, provider short reads, oversized responses, and context cancellation;
-- every remote request in a multi-request reader remains bound to one revision, including URL renewal, redirects, retries, and conditional range GETs;
+- every remote request in a multi-request range reader remains bound to one revision, including URL renewal, redirects, retries, and conditional range GETs;
+- a whole-file fill compares against the digest from the original OpenRead snapshot, not a fresh Stat, and publishes only on an exact match;
+- a declared-digest whole-file path does not grant range-cache eligibility;
 - conditional GET returning 200, a bad `Content-Range`, or a mismatched response ETag fails before publishing bytes;
 - interrupted temporary writes and startup orphan cleanup;
 - crash/torn files survive rename without fsync and are rejected by verification;

@@ -472,6 +472,7 @@ type Object struct {
 | Revision-bound read | 直接请求指定 revision，或返回 conflict | 可以 |
 | Conditional GET | 服务端对每个请求用 If-Match 和 strong ETag 验证版本，并返回可校验的 206 | 通过实测后可 |
 | Response version check | 只对不可变对象存储使用，响应版本必须等于请求版本 | 有条件允许 |
+| Whole-object declared-digest check | 完整下载后，与**打开快照时** provider 声明并嵌入 ContentVersion 的摘要一致 | 仅限整文件路径 |
 | Stat before/after read | 只能缩小竞态窗口，无法证明全程未变 | 不建议 |
 | Current revision only | 始终读最新内容 | 禁止 |
 
@@ -481,6 +482,16 @@ type Object struct {
 
 条件请求使用 `If-Match`，不使用 `If-Range` 作为版本门槛。`If-Range` 不匹配时服务端可以忽略 Range 并返回 200 全文。每个响应必须验证状态码为 206、`Content-Range` 的起点/终点/总大小正确、响应 ETag 等于请求版本；忽略条件、返回 200 或任何不一致都应转换为 `ErrConflict`，对已经返回的字节不能静默切换 revision。
 
+整对象下载后与声明摘要校验，可以证明“下载到的字节等于 provider 在快照版本下声明的内容”。这不需要知道服务端实际返回了哪个 revision；只读缓存只要求相同 `(ObjectID, ContentVersion)` 对应相同字节。该路径必须同时满足：
+
+1. 摘要来自 provider 元数据并嵌入 ContentVersion；本地计算的摘要不能单独构成版本。
+2. 比较对象是打开快照时保存的声明摘要，不是下载后重新 Stat 得到的摘要。
+3. 只对完整对象下载生效；range 读取不算，继续要求 If-Match 或 revision-bound read。
+4. 摘要不一致返回 `ErrConflict`，绝不能写入缓存。
+5. provider 的摘要可靠性必须先通过修改、重复内容和并发场景测试。
+
+这只适用于整文件路径，不能推广成 range 缓存的证明，也不能替代未来写入所需的 expected-version。
+
 ### 9.5 方案比较
 
 | 方案 | 优点 | 缺点 | 结论 |
@@ -488,7 +499,8 @@ type Object struct {
 | 保持单一 Version，只加强注释 | SDK 改动最小 | 无法表达强弱保证，弱 provider 容易被误用；metadata 和 content 变化混在一起 | 仅适合过渡 |
 | 单一 Version，但强制所有 provider 都提供强语义 | 模型最简单 | mtime/size 型 provider 无法合规；metadata 变化会误伤内容缓存 | 可作为 provider v2 的兼容层 |
 | 拆分 ContentVersion/MetadataVersion，并新增读取绑定能力 | 语义清晰，可按 provider/对象降级；适合写入冲突 | 需要 provider contract v2、协议升级和 conformance | 推荐 |
-| 用摘要直接充当版本 | 内容相等判断直接，可辅助完整性 | 多数服务不提供摘要；自己算需先下载；MD5 有碰撞问题；仍不能读旧版本 | 辅助，不作主键 |
+| 用本地计算摘要直接充当版本 | 内容相等判断直接，可辅助完整性 | 多数服务不提供摘要；自己算需先下载；MD5 有碰撞问题；仍不能读旧版本 | 只能作完整性辅助 |
+| 整对象下载后比对 provider 声明的快照摘要 | 不需要服务端 revision ID；whole-file 可证明内容等于声明 | 必须先完整下载；只适用小文件；依赖摘要语义实测 | 受限采纳 |
 | 只靠 mtime/size/TTL 的弱缓存 | 兼容性最高 | 可能返回旧内容，或在一段读取中跨版本 | 只能显式弱模式 |
 
 ### 9.6 建议的门槛
@@ -496,11 +508,13 @@ type Object struct {
 ```text
 StableObjectID
 && StrongContentVersion
-&& PerRequestExactRevisionRead (or verified conditional equivalent)
 && ReliableRangeRead
+&& (PerRequestExactRevisionRead
+    or verified conditional equivalent
+    or whole-object declared-digest verification)
 ```
 
-只有四项同时满足，文件数据才默认进入跨进程/重启持久缓存。
+只有对象身份、强内容版本、可靠 range 和至少一种能证明缓存资格的内容绑定方式同时满足，文件数据才默认进入跨进程/重启持久缓存。整对象摘要例外只允许 whole-file 条目。
 
 ### 9.7 WebDAV ETag
 
@@ -509,7 +523,7 @@ WebDAV 只能把强 `ContentVersion` 暴露为强 ETag。只有弱 metadata 指�
 ### 9.8 当前 provider 如何适配
 
 - PKU：优先把 AnyShare `rev` 映射为 ContentVersion，并保存 signed request 的 revision 绑定证据。
-- Baidu：`mtime + size + MD5` 可以辅助检测，但 dlink 未绑定 revision；在证明范围下载一致前，只能允许内存缓存。若 metadata MD5 经实机验证可靠，小于整文件阈值的对象可以完整下载并校验 MD5 后作为整文件条目缓存；更大文件不能由这一例外获得 range 缓存。MD5 只用于兼容性与意外变化检测，不作为安全承诺。
+- Baidu：`mtime + size + MD5` 可以辅助检测，但 dlink 未绑定 revision；在证明 range 下载一致前，range 缓存保持关闭。若 metadata MD5 经实机验证可靠，小于整文件阈值的对象可以完整下载并与打开快照中的 MD5 比对，通过后作为整文件条目缓存；更大文件不能由这一例外获得 range 缓存。MD5 只用于兼容性与意外变化检测，不作为抗攻击承诺。当前观察中只有部分字段是合法 MD5，因此默认仍关闭。
 - Local：默认绕过持久数据缓存；若未来需要，改用文件系统稳定 file ID 而不是相对路径。
 - S3：使用 versionId（如果 bucket 开启版本）或可靠 ETag，并通过条件读取验证。
 - Google Drive：普通二进制文件需要验证 md5/revision 与下载绑定；Drive 原生文档必须显式导出格式。
@@ -664,7 +678,7 @@ ReadAt
 - active reader 的块 pin 住；Windows 延迟删除。
 - 单账户暂不做严格公平，但有 per-account 统计；未来可加配额或权重。
 - 块大于预算时直接绕过持久化。
-- 启动扫描在后台建立 budget/LRU，删除孤儿 temp、非法 header 和大小不符文件；扫描完成前保守地禁止新持久写入。
+- 启动扫描只用文件 stat 的大小和 mtime 在后台建立 budget/LRU，并删除孤儿 temp；header 与 payload 校验推迟到首次命中。扫描完成前保守地避免超额写入。
 - 块路径采用 `entries/<namespaceTag>/<hash前两位>/<keyHash>.blk`，LRU 初版从文件 mtime 恢复并在命中时批量 touch。
 - payload SHA-256 能检测损坏和意外篡改，不能抵御同 OS 用户主动伪造；若威胁模型包含后者，需要 Keychain 保存的 message authentication code（MAC）或加密。
 
@@ -869,7 +883,7 @@ ReadAt
 2026-10-26 的独立审阅已对原十项给出明确立场；完整响应见 [design-review-response.md](design-review-response.md)。当前决定是：
 
 1. 拆分 `ContentVersion` 与可选 `MetadataVersion`。
-2. 持久缓存门槛是每个远端请求绑定版本；条件 GET 改用 `If-Match` 并通过实测。
+2. range 持久缓存门槛是每个远端请求绑定版本；条件 GET 改用 `If-Match` 并通过实测。整文件允许与打开快照中的 provider 声明摘要比对，但不得推广到 range。
 3. factory 声明上限，session 探测收窄，对象可退出。
 4. binding fingerprint 存在 AccountID 旁边，不参与随机 ID 派生。
 5. FUSE 用显式 node map；FSKit 暂时关闭 persistent IDs，之后要么持久映射要么保持关闭。

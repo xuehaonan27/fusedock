@@ -125,7 +125,7 @@ type ReadCapabilities interface {
 | # | 决定 |
 | --- | --- |
 | 1 | 拆分 ContentVersion 和可选 MetadataVersion；MetadataVersion 缺失时，VFS 只用于弱 metadata 缓存。 |
-| 2 | 每个远端请求绑定版本；revision read、经过实测的 strong If-Match GET，或不可变对象存储的等价证明可以启用缓存。前后 Stat 不够。 |
+| 2 | range 读取必须每个远端请求绑定版本：revision read、经过实测的 strong If-Match GET，或不可变对象存储的等价证明。整文件路径还可使用打开快照中的 provider 声明摘要校验；前后 Stat 不够。 |
 | 3 | factory 声明上限，session 探测收窄，对象级可退出。 |
 | 4 | fingerprint 存在 AccountID 旁，不参与派生；字段集版本化并显式列举。 |
 | 5 | FUSE 用显式 node map；FSKit 先关闭 persistent IDs，之后由 daemon 持久映射或保持关闭。 |
@@ -135,34 +135,38 @@ type ReadCapabilities interface {
 | 9 | macOS 默认按账户挂载 volume；aggregate 先用于 CLI/WebDAV。名称冲突拒绝，不做隐式转义。 |
 | 10 | 用显式 Kind/能力表达 Document、Shortcut、Export；不能伪装成未知大小的普通文件。 |
 
-## 条件采纳、暂缓验证与明确偏离
+## 条件采纳、暂缓验证与共同约束
 
 ### 条件采纳
 
-- **Baidu 小文件整文件摘要缓存**：采纳机制，但启用前必须实测 XPAN MD5。评审的前提是“MD5 字段经实测可靠”；当前代码只证明 `dlink` 能被请求和 Range 能校验，未证明列表里的 MD5 始终对应当前下载内容。实测需覆盖另端修改、重命名、共享文件和云端特殊对象。未通过前不默认开启。
+- **Baidu 小文件整文件摘要缓存**：采纳。摘要必须来自 provider 元数据并嵌入 ContentVersion，比较对象是打开快照中已保存的声明值，不是下载后重新 Stat 得到的新值。只允许 whole-file；不匹配返回 `ErrConflict` 且不写缓存。启用前仍要实测 XPAN MD5 的修改、重复内容和并发可靠性；当前扫描只有 116/823 个值是可解析的 32-hex MD5，因此默认关闭。
 - **条件 GET**：采纳，但只允许 strong ETag、每个请求携带 `If-Match`、响应 206/`Content-Range`/总大小/响应 ETag 全部校验，并实测服务器确实拒绝不匹配条件。把 200 全文或弱 ETag 当作成功的做法不采纳。
 - **不可变对象存储的响应版本校验**：可以作为精确 revision 的等价证明，但前提是对象存储保证 versionId 不可变且响应可绑定该版本；这不是普通可变后端的通用捷径。
 - **macOS 元数据索引保护**：采纳 `.metadata_never_index` 和拒绝 WebDAV `Depth: infinity`，但仍需实机验证 FSKit/Spotlight/QuickLook 是否遵守；未验证前把它当防护实验，而非已完成保证。
 
 ### 暂缓验证
 
-- **FUSE `st_ino = nodeid`**：不把它直接写成跨平台契约。go-fuse 的协议 nodeid 与对外 `st_ino` 是不同层；采纳入的是“顺序分配、NodeKey 映射、不要 hash object ID”，具体是否相等由真实 go-fuse 测试决定。这样做是为了避免把库内部 ID 当成 POSIX inode 语义，尤其是在 readdir、getattr、lookup 和 future hard-link 场景。
-- **固定 30–60 秒 TTL**：采纳“不要固定 2 秒”的方向，但不在没有数据时换一个同样武断的数字。不同 provider 的限频、目录大小和 Finder 重列频率差异很大；先测量，再给默认值和显式 invalidate。
+- **FUSE `st_ino = nodeid`**：不把它直接写成跨平台契约。go-fuse 按 `StableAttr` 去重 Inode，同 `Ino` 的不同对象会复用同一个 Inode，这是必须实测的具体失败模式。Linux 测试将显式构造同 `Ino` 的两个节点，验证服务返回的是旧节点，再验证 NodeKey 映射修复。
+- **固定 30–60 秒 TTL**：采纳“per-provider 可调、默认由测量决定”；30–60 秒只是例子。测试记录 Finder 打开窗口并滚动一次后 60 秒内的 List/Stat 数，以及百度从第几次列表请求开始返回限频。
 - **FUSE/FSKit 持久映射**：暂缓到 daemon 能持久保存 NodeKey→平台 ID，并能从重启后收到的 ID 找回对象。只做 64-bit hash 再内存检测碰撞，不能声称 persistent ID。FSKit 现在先设为 false。
-- **启动时全量 payload 哈希**：评审实际建议的是启动扫 header/大小、首次命中校验 payload；我们按此采纳。若另指每次启动重算所有 payload，则不采纳，因为 10 GiB 缓存会造成无谓启动 I/O；首命中校验已经能在返回字节前发现损坏。
+- **启动时校验**：启动只需要 stat 的大小和 mtime 来建立 budget/LRU；header 和 payload 校验都推迟到首次命中。不采纳每次启动重算所有 payload 或 header，因为 10 GiB 缓存会造成无谓启动 I/O；首命中校验已经能在返回字节前发现损坏。
 
-### 明确偏离
+### 共同约束，不再列为拒绝项
 
-- **摘要作为持久缓存的唯一版本证明**：不采纳。下载后算摘要只能证明“这次下载的字节自洽”，除非 provider 把摘要和 requested revision 绑定；MD5 还缺少抗碰撞保证。摘要只作 byte-integrity / accidental-change 的第二道校验，不能替代每请求 revision binding。
-- **把 `ObjectID` 或显示路径作为缓存身份**：不采纳。两个账户可能返回相同 ObjectID；路径可改名。身份必须是完整 NodeKey，版本只在其上限定内容。
-- **让缓存失败影响有效远端读取**：不采纳。缓存是优化，写失败、损坏和预算不足都必须退化为 miss 或直接返回已下载字节。
+此前把下面三项列入“不采纳”是不准确的归类；它们本来就是审阅与实现共同主张的约束：
+
+- **缓存身份使用完整 NodeKey**，不使用裸 ObjectID 或显示路径。
+- **缓存失败不能破坏有效远端读取**；写失败、损坏和预算不足必须安全降级。
+- **服务端未满足条件 GET 或 revision 绑定时返回 `ErrConflict`**。
+
+对于摘要，双方主张已收口为上面的五条整文件规则。**本地计算一个未经 provider 声明的摘要并把它当作 ContentVersion** 仍不允许；这不是审阅提出的替代方案，而是其规则明确排除的做法。除了这个未被审阅建议的做法外，审阅提出的实质方案目前没有仍被拒绝的项。
 
 ## 新的验收顺序
 
 1. FSKit 不再虚假声明持久对象 ID；本机挂载不因撤回声明而退化。
 2. 账户迁移后 AccountID、凭据项和 binding fingerprint 重启稳定。
 3. extension 重启后无需 CLI 在场即可重新连接 daemon；读取响应全程为二进制。
-4. provider conformance 证明每次远端请求都绑定同一 ContentVersion；冲突不会混入任何字节。
+4. provider conformance 证明 range 的每次远端请求都绑定同一 ContentVersion；整文件摘要路径与打开快照中的声明一致；冲突不会混入任何字节。
 5. 元数据和内存基线满足 Finder 场景，块大小、预读和 TTL 有测量依据。
 6. 重启后的缓存命中、损坏恢复、LRU、并发填充和账户隔离全部通过。
 7. 只有以上门槛完成后才默认启用磁盘缓存。

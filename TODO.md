@@ -96,7 +96,7 @@ Acceptance: a machine reboot restores the service and endpoints; an FSKit extens
 - [ ] Use `If-Match` with a strong ETag for conditional reads. Do not use `If-Range` as the exact-version gate; a failed `If-Range` may produce a full 200 response.
 - [ ] Validate `206`, `Content-Range`, full size, and response ETag on every conditional request.
 - [ ] Add optional full-file digest metadata with algorithm and coverage. Treat MD5 as a compatibility/accidental-change check, not a security guarantee.
-- [ ] Allow a whole-file cache fill below the configured threshold only after the downloaded digest matches the metadata digest; keep range caching disabled where that proof is absent.
+- [ ] Implement the five-rule whole-file digest path: metadata-declared digest embedded in ContentVersion; compare against the `OpenRead` snapshot, never a fresh Stat; whole-object only; mismatch is `ErrConflict` with no publish; provider digest passes modification, duplicate-content, and concurrency tests. Keep range caching disabled for this path.
 - [ ] Add two-session mutation tests: one session changes or replaces the file while another reads open ranges. Cover every boundary and ensure no handle mixes revisions.
 - [ ] Probe fresh and renewed signed URLs, revision rollback, online editing, and restart behavior for PKU.
 - [ ] Keep Baidu persistent caching off until its dlink/MD5 path passes equivalent tests. Reuse `FUSEDOCK_LIVE_ACCOUNTS=1` fixture results: only canonical 32-hex fields are candidates, and 707/823 observed fields were not MD5.
@@ -110,7 +110,7 @@ Acceptance: conformance fails a provider that caches a weak version or binds onl
 
 - [ ] Add a resolver that returns `NodeKey` plus the exact `ObjectRevision` from a trusted session.
 - [ ] Change broker wire requests to carry NodeKey/object ID and expected revision only; the daemon resolves the authoritative Object from session state.
-- [ ] Replace FUSE bare-ID inode hashing with a NodeKey-to-node map, stable within a mount and collision-safe; test go-fuse protocol node IDs separately from user-visible `st_ino` before deciding their relationship.
+- [ ] Replace FUSE bare-ID inode hashing with a NodeKey-to-node map, stable within a mount and collision-safe. On Linux, force two distinct objects to the same `StableAttr.Ino` and demonstrate that go-fuse returns the previously known Inode; then verify the NodeKey mapping prevents that failure. Test protocol node IDs separately from user-visible `st_ino`.
 - [ ] For FSKit, keep `supportsPersistentObjectIDs = false` now. Either retain that until a daemon-owned persistent NodeKey map exists, or implement the map and resolve arbitrary persisted identifiers correctly.
 - [ ] Derive FSKit volume UUID as UUIDv5 over a versioned encoding of AccountID and normalized scope; reject a duplicate AccountID+scope mount while allowing distinct scopes.
 - [ ] Ensure single-account and aggregate views resolve the same remote object to the same NodeKey.
@@ -124,7 +124,7 @@ Acceptance: identical provider IDs in two accounts cannot alias nodes; a remount
 - [ ] Add one provider error -> VFS error -> errno/HTTP mapping table. Map read-handle conflict to `ESTALE` and write conflict to `EBUSY`.
 - [ ] Add explicit object kinds/capabilities for provider-native documents, shortcuts, exports, and unknown-size objects. Do not expose an unknown-size export as an ordinary file.
 - [x] Capture preliminary PKU/Baidu CLI listing latency and FSKit cold/warm small-read measurements in [docs/prerequisite-test-results.md](docs/prerequisite-test-results.md).
-- [ ] Add provider-call and byte counters to the shared daemon path before measuring Finder relist and QuickLook behavior.
+- [ ] Add provider-call and byte counters to the shared daemon path. Record List/Stat calls during 60 seconds after opening and scrolling a Finder window, and record when Baidu starts returning rate limits. Treat 30–60 seconds only as an example interval, never a hard-coded default.
 - [ ] Benchmark per-request latency and range throughput with instrumentation, cache-hit cost, and memory use at 1/10/100/1000 handles.
 - [ ] Use those measurements to set block size, read-ahead, in-memory cap, metadata TTL, and whole-file threshold. Record the baseline in the design docs.
 - [ ] Run an A/B block-size test against the same cold files and a real Finder/QuickLook mount at a normal home-directory path.
@@ -138,14 +138,13 @@ Acceptance: defaults have measurements and documented provider-specific values; 
 - [ ] Make one broker/daemon process the cache owner and pass one cached VFS session to FSKit and WebDAV.
 - [ ] Remove duplicate per-handle block caching where it would compete with the shared cache.
 - [ ] Store blocks under `entries/<namespaceTag>/<keyHash[:2]>/<keyHash>.blk`; use the namespace tag only for isolation, accounting, and clear.
-- [ ] Use a background startup scan for budget/LRU. Until it finishes, behave as if the budget is full and avoid new persistent writes.
-- [ ] Validate header and file size at startup, then verify payload SHA-256 once per process on first hit. Track a verified flag and delete/refill on mismatch.
+- [ ] Use a background stat-only scan (size and mtime) for budget/LRU. Until enough metadata is available, remain conservative and avoid overcommitting. Defer header and payload SHA-256 validation to first hit; track a verified flag and delete/refill on mismatch.
 - [ ] Avoid per-block `fsync` and directory `fsync` by default. Atomically rename a complete temp file, detect torn files after crash by header/hash, and provide an optional conservative sync mode.
 - [ ] Recover LRU order from file mtime/touch metadata in batches; do not write one access timestamp per small read.
 - [ ] Open block files through a confined root with no-follow semantics and validate the opened object, avoiding lstat/open races.
 - [ ] Keep a global memory budget and global fill concurrency budget independent of disk budget.
 - [ ] Support per-account disable of persistent data caching and per-object opt-out.
-- [ ] Permit the small-file whole-file digest path only when the exact metadata digest and downloaded digest agree; never extend that exception to unverified range reads.
+- [ ] Gate the small-file whole-file digest path on the five rules above and measured digest reliability; never extend that exception to unverified range reads.
 - [ ] Add cache info, clear, prune, and integrity-check commands.
 - [ ] Add metrics for hit rate, coalesced fetches, network bytes, evicted bytes, corruption, verification cost, and cache write failures.
 - [ ] Do not add bbolt for the initial block index; revisit only if measured startup or lookup cost requires it.

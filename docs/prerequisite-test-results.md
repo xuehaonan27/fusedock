@@ -18,7 +18,7 @@ These are preflight measurements for the review gates in [TODO.md](../TODO.md). 
 | Folder listing latency | Measured roughly | Three root `ls` runs took 2.74–3.71 seconds for Baidu and 3.45–3.67 seconds for PKU, including process startup and login restore. These are not yet Finder relist measurements. |
 | FSKit cold/warm read | Measured on PKU | The first 1 KiB read of a PDF took 8.84 seconds; the immediate second read took 0.000016 seconds. The VFS still expands a cold small read to a 4 MiB aligned provider range, so block size remains provisional. |
 | Metadata indexing | Not proven | `mdutil -s` reported indexing disabled for the temporary test mount, which may reflect the `/tmp` location rather than the FSKit volume. Synthetic `.metadata_never_index` behavior still needs tests at a normal home-directory mount. |
-| Linux FUSE identity | Blocked by host | There is no `/dev/fuse`, `fusermount3`, container runtime, or Linux VM on this machine. Builds and unit tests pass, but FUSE nodeid/`st_ino` behavior cannot be confirmed here. |
+| Linux FUSE identity | Test prepared; blocked by host | `internal/fusefs/stable_attr_collision_test.go` forces two distinct objects to share one `StableAttr.Ino` and checks go-fuse's deduplication. It cross-compiles for Linux, but this machine has no `/dev/fuse`, `fusermount3`, container runtime, or Linux VM, so the test has not run. |
 | In-memory cap | Not implemented yet | Per-handle blocks remain unbounded. A synthetic thousand-handle test must be added with the memory-budget implementation. |
 
 ## What is now ruled out
@@ -33,3 +33,10 @@ These are preflight measurements for the review gates in [TODO.md](../TODO.md). 
 - Mount at a normal user home path, test a synthetic `.metadata_never_index`, and count provider calls during Finder/Spotlight/QuickLook activity.
 - Add a Linux FUSE VM or host and test `st_ino`, readdir `d_ino`, lookup/getattr consistency, and remount behavior.
 - Add request counters to the daemon path before implementing persistent caching, so Finder relist and cache-hit costs can be measured without guessing.
+
+## Second review closure
+
+- Whole-object digest verification is accepted under five rules: provider-declared digest embedded in ContentVersion; compare with the OpenRead snapshot; whole-object only; mismatch returns `ErrConflict` and publishes nothing; digest reliability passes modification, duplicate-content, and concurrency tests.
+- ObjectID/path cache identity and cache-failure isolation were review-aligned constraints, not rejected proposals.
+- FUSE collision evidence is prepared as a Linux test but not executed on this host.
+- Startup budget/LRU metadata should come from stat size/mtime; header and payload verification move to first access.
