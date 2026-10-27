@@ -4,6 +4,8 @@ This is the prioritized engineering backlog. It records the next product stages;
 
 The 2026-10-26 external review and our disposition are in [FuseDock 设计审阅意见.md](FuseDock%20设计审阅意见.md) and [docs/design-review-response.md](docs/design-review-response.md). The review corrected the content-version scope, moved revision binding to every remote request, and made the FSKit lifecycle/control plane a prerequisite for persistent identity.
 
+The first prerequisite-test round and its evidence are recorded in [docs/prerequisite-test-results.md](docs/prerequisite-test-results.md). A gate is removed from this plan only after it passes; a failed or inconclusive experiment remains an explicit blocker.
+
 The immediate dependency order is:
 
 1. Correct the version contract and remove unsafe platform claims immediately.
@@ -19,16 +21,33 @@ The immediate dependency order is:
 
 Do not enable a shared disk cache before the namespace contract is implemented and tested. Do not start the write path before the persistent cache and identity model are stable.
 
+## Verification gates and current results
+
+| Gate | Current result | Plan treatment |
+| --- | --- | --- |
+| FSKit persistent object IDs | Passed for immediate guardrail | `supportsPersistentObjectIDs` is now `false`; a PKU volume still installs, mounts, and lists. Restore persistent IDs only with a daemon-owned mapping. |
+| WebDAV recursive PROPFIND | Passed | `Depth: 1` returns 207 and `Depth: infinity` returns 403. Keep the regression test. |
+| Repeated macOS security prompts | Passed for unchanged state | Lazily refresh credentials, skip unchanged state writes, and stop rewriting ACLs. Real Baidu and PKU `ls` completed after rebuild without a prompt. AccountID-keyed items remain the long-term cleanup. |
+| FSKit extension restart | Failed, blocking | Killing the extension left the mounted child returning `ENOENT`; the one-use capability did not reconnect. This is why UDS/XPC and signed peer identity remain on the critical path. |
+| Baidu digest eligibility | Failed for default caching, partial evidence | Of 823 scanned files, 116 had canonical 32-hex MD5 values and 707 did not. Five canonical samples matched download, repeat read, and range bytes. Keep persistent caching off; test duplicate content and remote mutation next. |
+| Cold/warm FSKit read | Preliminary only | A PKU PDF's first 1 KiB read took 8.84 s; the immediate repeat was effectively instant. This shows 4 MiB fill amplification on cold reads, not enough evidence to lock block size or read-ahead. |
+| Folder listing latency | Preliminary only | Three CLI root listings took 2.74–3.71 s for Baidu and 3.45–3.67 s for PKU including process startup and login restore. No Finder relist or provider-call count exists yet. |
+| Metadata indexing protection | Inconclusive | The temporary `/tmp` FSKit mount reported indexing disabled, which may not represent a normal home-directory mount. Test `.metadata_never_index`, Spotlight, and QuickLook at a real mount before claiming protection. |
+| Linux FUSE identity | Blocked by environment | This macOS machine has no `/dev/fuse`, `fusermount3`, Linux VM, or container runtime. Cross-build passes; native `st_ino`, readdir `d_ino`, lookup/getattr, and remount behavior still require a Linux host or CI runner. |
+| In-memory cap | Not implemented | Per-handle blocks remain unbounded. Implement the global budget and a thousand-handle memory test before persistent caching. |
+
 ## 0.2 Namespace and local service foundation
 
 ### A0. Contract correction and immediate guardrails
 
-- [ ] Replace the global version invariant with the object-scoped rule: for one `AccountID + ProviderID + ObjectID`, equal non-empty `ContentVersion` implies equal size and bytes; different objects may share a version token.
-- [ ] Change the FSKit extension to declare `supportsPersistentObjectIDs = false` until a daemon-owned persistent `NodeKey` mapping exists.
+- [x] Replace the documented global version invariant with the object-scoped rule: for one `AccountID + ProviderID + ObjectID`, equal non-empty `ContentVersion` implies equal size and bytes; different objects may share a version token.
+- [ ] Implement the object-scoped ContentVersion model in the provider API and broker wire format.
+- [x] Change the FSKit extension to declare `supportsPersistentObjectIDs = false` until a daemon-owned persistent `NodeKey` mapping exists.
 - [ ] Replace unbounded per-handle blocks with a global, configurable memory budget; retain no more than one useful block per active handle under that budget.
 - [ ] Make metadata TTL configurable per provider/session and add an explicit invalidation command. Do not keep a fixed 2-second remote default without measurements.
 - [ ] Render a synthetic `.metadata_never_index` on macOS when it does not collide with a remote object, then verify Finder, Spotlight, and QuickLook behavior on a real FSKit volume.
-- [ ] Reject WebDAV `PROPFIND` with `Depth: infinity`.
+- [x] Reject WebDAV `PROPFIND` with `Depth: infinity`.
+- [x] Stop redundant credential-store writes and PKU's unconditional token refresh; verify unchanged real accounts do not prompt on every command.
 - [ ] Add regression tests proving no cache is enabled for a provider or object that lacks the required revision guarantees.
 
 Acceptance: FSKit no longer claims persistent IDs it cannot resolve; memory stays within the configured cap during a synthetic thousand-handle workload; a remote provider is not queried for every metadata access solely because of a hard-coded TTL; metadata indexing and WebDAV recursive walks cannot trigger an unbounded scan.
@@ -64,6 +83,8 @@ Acceptance: an unchanged binding keeps its ID across restart and reauthenticatio
 - [ ] Add one request ID across extension/CLI, daemon, VFS, and provider calls; diagnostics must not include file contents or signed URLs.
 - [ ] Add loopback port occupancy and stale-endpoint diagnostics. A stale port can produce Finder's misleading NetAuthAgent message even when credentials are correct.
 
+The extension-restart preflight already fails with `ENOENT`, confirming that capability lifecycle is a correctness/availability gate rather than a later security cleanup.
+
 Acceptance: a machine reboot restores the service and endpoints; an FSKit extension killed and restarted reconnects without a CLI running; reauthentication moves the account from `reauth_required` to `ready` without losing the mount; no file payload crosses the control plane as base64.
 
 ### C. Provider revision contract and conformance
@@ -77,7 +98,9 @@ Acceptance: a machine reboot restores the service and endpoints; an FSKit extens
 - [ ] Add optional full-file digest metadata with algorithm and coverage. Treat MD5 as a compatibility/accidental-change check, not a security guarantee.
 - [ ] Allow a whole-file cache fill below the configured threshold only after the downloaded digest matches the metadata digest; keep range caching disabled where that proof is absent.
 - [ ] Add two-session mutation tests: one session changes or replaces the file while another reads open ranges. Cover every boundary and ensure no handle mixes revisions.
-- [ ] Probe fresh and renewed signed URLs, revision rollback, online editing, and restart behavior for PKU. Keep Baidu persistent caching off until its dlink/MD5 path passes equivalent tests.
+- [ ] Probe fresh and renewed signed URLs, revision rollback, online editing, and restart behavior for PKU.
+- [ ] Keep Baidu persistent caching off until its dlink/MD5 path passes equivalent tests. Reuse `FUSEDOCK_LIVE_ACCOUNTS=1` fixture results: only canonical 32-hex fields are candidates, and 707/823 observed fields were not MD5.
+- [ ] Add duplicate-content, one-copy-modified, rename, shared-file, and concurrent-mutation tests before enabling even the Baidu whole-file digest path.
 - [ ] Update `pkg/providertest` to exercise capabilities, exact revisions, concurrent mutation, short reads, oversized responses, and cancellation.
 - [ ] Audit PKU, Baidu, local, broker, and future providers; document capability evidence rather than inferred behavior.
 
@@ -100,8 +123,11 @@ Acceptance: identical provider IDs in two accounts cannot alias nodes; a remount
 - [ ] Document retry ownership: providers own HTTP retries and `Retry-After`; VFS does not retry network reads. A one-time pre-byte re-resolution after `ErrConflict` is allowed, never after partial bytes.
 - [ ] Add one provider error -> VFS error -> errno/HTTP mapping table. Map read-handle conflict to `ESTALE` and write conflict to `EBUSY`.
 - [ ] Add explicit object kinds/capabilities for provider-native documents, shortcuts, exports, and unknown-size objects. Do not expose an unknown-size export as an ordinary file.
-- [ ] Benchmark PKU/Baidu per-request latency and range throughput, Finder relist provider-call counts, QuickLook read patterns, cache-hit cost, and memory use at 1/10/100/1000 handles.
+- [x] Capture preliminary PKU/Baidu CLI listing latency and FSKit cold/warm small-read measurements in [docs/prerequisite-test-results.md](docs/prerequisite-test-results.md).
+- [ ] Add provider-call and byte counters to the shared daemon path before measuring Finder relist and QuickLook behavior.
+- [ ] Benchmark per-request latency and range throughput with instrumentation, cache-hit cost, and memory use at 1/10/100/1000 handles.
 - [ ] Use those measurements to set block size, read-ahead, in-memory cap, metadata TTL, and whole-file threshold. Record the baseline in the design docs.
+- [ ] Run an A/B block-size test against the same cold files and a real Finder/QuickLook mount at a normal home-directory path.
 - [ ] Add CLI invalidation for metadata and cache when a user needs an immediate refresh.
 
 Acceptance: defaults have measurements and documented provider-specific values; retries cannot multiply across layers; stale metadata refresh is explicit and bounded; unknown-size/provider-native objects have defined surface behavior.
@@ -165,7 +191,7 @@ Acceptance: Finder can reconnect after a daemon restart using the same saved ser
 
 ### Platform drivers
 
-- [ ] Run native Linux FUSE acceptance on a FUSE-enabled host.
+- [ ] Run native Linux FUSE acceptance on a FUSE-enabled host or CI runner; the current macOS-only machine cannot execute this gate.
 - [ ] Re-run macOS FSKit acceptance after daemon deployment and extension updates.
 - [ ] Add a WinFsp/cgofuse backend with native Windows mount, range-read, rename, and unmount tests.
 - [ ] Add a signed Windows service/tray host and protected cache/credential directory handling.

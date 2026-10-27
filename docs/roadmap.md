@@ -4,6 +4,8 @@ The actionable, prioritized backlog now lives in [TODO.md](../TODO.md). This fil
 
 The ordering is based on validating core contracts before multiplying surfaces and provider-specific behavior.
 
+The first gate-test round is recorded in [prerequisite-test-results.md](prerequisite-test-results.md). FSKit persistent-ID withdrawal, WebDAV depth protection, and lazy credential writes have landed; FSKit restart reconnection, Linux FUSE identity, Baidu digest reliability, Finder/QuickLook measurements, metadata indexing behavior, and the memory cap remain open.
+
 ## 0.1 Read-only vertical slice
 
 - Provider registry with descriptor-driven CLI discovery.
@@ -19,6 +21,7 @@ The ordering is based on validating core contracts before multiplying surfaces a
 - Add immutable AccountID, binding fingerprints, and account-ID-keyed credentials.
 - Add a supervised daemon and a reconnectable, peer-authenticated control/data plane.
 - Prove per-request revision binding and establish metadata, Finder, QuickLook, and range baselines.
+- Use the recorded preflight results as gates; do not replace measured defaults with another estimate.
 - Run native FUSE acceptance on Linux and FSKit mount acceptance on macOS.
 - Add a bounded disk cache keyed by account, object ID, content version, and range.
 - Add a multi-account virtual root.
