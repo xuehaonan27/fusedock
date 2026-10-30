@@ -85,7 +85,7 @@ The NFS bridge remains a future fallback for systems where FSKit or extension de
 - The FSKit extension is read-only.
 - CAPTCHA/OTP prompts are not yet connected to the host application.
 - The daemon has launchd service registration and same-user UDS control. Signed peer authentication and automatic extension reconnection are pending.
-- Xcode 27 compilation and native revision/cache acceptance are pending on a suitable host; the current development machine runs macOS 26.5.1.
+- Xcode 27 compilation passed in GitHub Actions. Native revision/cache acceptance needs macOS 27 with the signed extension enabled; the current development machine runs macOS 26.5.1.
 - The legacy direct credential-file path remains as a fallback, but it is read-only and does not persist a refresh session.
 - The extension requires local signing and the one-time Filesystem Extension toggle.
 - The current implementation is a development build; distribution needs an app bundle, notarization, and a release workflow.

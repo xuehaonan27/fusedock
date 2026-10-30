@@ -110,6 +110,10 @@ func Run(t *testing.T, mount Mount, prepare ...func(string) error) {
 		t.Fatal("native mount did not become ready")
 	}
 	path := filepath.Join(point, "file.txt")
+	entries, err := os.ReadDir(point)
+	if err != nil || len(entries) != 1 || entries[0].Name() != "file.txt" {
+		t.Fatalf("native directory listing: %v %v", entries, err)
+	}
 	old, err := os.Open(path)
 	if err != nil {
 		t.Fatal(err)

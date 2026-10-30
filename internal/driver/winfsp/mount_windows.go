@@ -7,8 +7,12 @@ import (
 	"github.com/xuehaonan27/fusedock/internal/namespace"
 	"github.com/xuehaonan27/fusedock/pkg/provider"
 	"io"
+	"os"
 	"strings"
 	"sync"
+	"time"
+
+	"golang.org/x/sys/windows"
 )
 
 type handle struct {
@@ -217,6 +221,23 @@ func Mount(ctx context.Context, s provider.Session, path, name string, debug boo
 			return nil
 		}
 	}
+	// Init runs before WinFsp publishes the mountpoint. Readiness means the
+	// path resolves to this volume, so consumers can immediately issue I/O.
+	probeCtx, stopProbe := context.WithTimeout(ctx, 15*time.Second)
+	defer stopProbe()
+	ticker := time.NewTicker(10 * time.Millisecond)
+	defer ticker.Stop()
+	for !mountedVolume(path, name) {
+		select {
+		case <-done:
+			return errors.New("WinFsp stopped before publishing the mountpoint")
+		case <-probeCtx.Done():
+			host.Unmount()
+			<-done
+			return probeCtx.Err()
+		case <-ticker.C:
+		}
+	}
 	if ready != nil {
 		ready()
 	}
@@ -233,4 +254,20 @@ func Mount(ctx context.Context, s provider.Session, path, name string, debug boo
 		<-done
 		return nil
 	}
+}
+
+func mountedVolume(path, name string) bool {
+	if len(path) == 2 && path[1] == ':' {
+		path += "\\"
+	}
+	file, err := os.Open(path)
+	if err != nil {
+		return false
+	}
+	defer file.Close()
+	var label [256]uint16
+	if err := windows.GetVolumeInformationByHandle(windows.Handle(file.Fd()), &label[0], uint32(len(label)), nil, nil, nil, nil, 0); err != nil {
+		return false
+	}
+	return windows.UTF16ToString(label[:]) == name
 }
