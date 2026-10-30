@@ -10,7 +10,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/xuehaonan/fusedock/pkg/provider"
+	"github.com/xuehaonan27/fusedock/pkg/provider"
 )
 
 const content = "0123456789abcdefghijklmnopqrstuvwxyz"
@@ -52,7 +52,7 @@ func TestDeviceAuthorizationAndReadOnlySession(t *testing.T) {
 		case "/rest/2.0/xpan/multimedia":
 			json.NewEncoder(w).Encode(map[string]any{
 				"errno": 0,
-				"list":  []map[string]any{{"dlink": serverURL(r) + "/download?signature=test"}},
+				"list":  []map[string]any{{"dlink": serverURL(r) + "/download?signature=test", "fs_id": 42, "server_filename": "sample.txt", "path": "/sample.txt", "size": len(content), "md5": "m1", "isdir": 0, "server_mtime": 1700000000}},
 			})
 		case "/download":
 			if r.Header.Get("User-Agent") != userAgent {

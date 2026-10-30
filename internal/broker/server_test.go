@@ -12,8 +12,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/xuehaonan/fusedock/internal/providers/local"
-	"github.com/xuehaonan/fusedock/pkg/provider"
+	"github.com/xuehaonan27/fusedock/internal/providers/local"
+	"github.com/xuehaonan27/fusedock/pkg/provider"
 )
 
 const testBootstrap = "0123456789abcdef0123456789abcdef"
@@ -43,7 +43,7 @@ func newFixture(t *testing.T) fixture {
 	httpServer := httptest.NewServer(server.Handler())
 	t.Cleanup(httpServer.Close)
 	client := &http.Client{}
-	claim := post(t, client, httpServer.URL, testBootstrap, "/v1/claim", struct{}{})
+	claim := post(t, client, httpServer.URL, testBootstrap, "/v2/claim", struct{}{})
 	var response ClaimResponse
 	decodeTestJSON(t, claim, &response)
 	if response.Version != ProtocolVersion || len(response.Token) < 32 {
@@ -54,26 +54,28 @@ func newFixture(t *testing.T) fixture {
 
 func TestBrokerClaimAndReadOnlyOperations(t *testing.T) {
 	f := newFixture(t)
-	rootResponse := post(t, f.client, f.httpServer.URL, f.token, "/v1/root", struct{}{})
+	rootResponse := post(t, f.client, f.httpServer.URL, f.token, "/v2/root", struct{}{})
 	var root provider.Object
 	decodeTestJSON(t, rootResponse, &root)
 	if !root.IsDir() || root.ID == "" {
 		t.Fatalf("unexpected root: %+v", root)
 	}
-	listResponse := post(t, f.client, f.httpServer.URL, f.token, "/v1/list", ListRequest{ParentID: root.ID})
+	listResponse := post(t, f.client, f.httpServer.URL, f.token, "/v2/list", ListRequest{ParentID: root.ID})
 	var objects []provider.Object
 	decodeTestJSON(t, listResponse, &objects)
 	if len(objects) != 1 || objects[0].Name != "hello.txt" {
 		t.Fatalf("unexpected listing: %+v", objects)
 	}
-	lookup := post(t, f.client, f.httpServer.URL, f.token, "/v1/lookup", LookupRequest{ParentID: root.ID, Name: "hello.txt"})
+	lookup := post(t, f.client, f.httpServer.URL, f.token, "/v2/lookup", LookupRequest{ParentID: root.ID, Name: "hello.txt"})
 	var file provider.Object
 	decodeTestJSON(t, lookup, &file)
-	read := postRaw(t, f.client, f.httpServer.URL, f.token, "/v1/read", ReadRequest{Object: file, Offset: 6, Length: 6})
+	var opened OpenResponse
+	decodeTestJSON(t, post(t, f.client, f.httpServer.URL, f.token, "/v2/open", OpenRequest{ObjectID: file.ID}), &opened)
+	read := postRaw(t, f.client, f.httpServer.URL, f.token, "/v2/read", ReadRequest{Handle: opened.Handle, Offset: 6, Length: 6})
 	if string(read) != "broker" {
 		t.Fatalf("unexpected range: %q", read)
 	}
-	stat := post(t, f.client, f.httpServer.URL, f.token, "/v1/stat", StatRequest{Object: file})
+	stat := post(t, f.client, f.httpServer.URL, f.token, "/v2/stat", StatRequest{ObjectID: file.ID})
 	var statObject provider.Object
 	decodeTestJSON(t, stat, &statObject)
 	if statObject.ID != file.ID || statObject.Size != file.Size {
@@ -84,9 +86,9 @@ func TestBrokerClaimAndReadOnlyOperations(t *testing.T) {
 func TestBrokerRejectsUnauthenticatedAndBootstrapDataRequests(t *testing.T) {
 	f := newFixture(t)
 	for _, tc := range []struct{ token, path string }{
-		{"", "/v1/root"},
-		{"wrong-token", "/v1/root"},
-		{testBootstrap, "/v1/root"},
+		{"", "/v2/root"},
+		{"wrong-token", "/v2/root"},
+		{testBootstrap, "/v2/root"},
 	} {
 		response := post(t, f.client, f.httpServer.URL, tc.token, tc.path, struct{}{})
 		if response.StatusCode != http.StatusUnauthorized {
@@ -94,7 +96,7 @@ func TestBrokerRejectsUnauthenticatedAndBootstrapDataRequests(t *testing.T) {
 		}
 		response.Body.Close()
 	}
-	claim := post(t, f.client, f.httpServer.URL, testBootstrap, "/v1/claim", struct{}{})
+	claim := post(t, f.client, f.httpServer.URL, testBootstrap, "/v2/claim", struct{}{})
 	defer claim.Body.Close()
 	if claim.StatusCode != http.StatusUnauthorized && claim.StatusCode != http.StatusConflict {
 		t.Fatalf("bootstrap claimed twice: %d", claim.StatusCode)
@@ -103,7 +105,7 @@ func TestBrokerRejectsUnauthenticatedAndBootstrapDataRequests(t *testing.T) {
 
 func TestBrokerRejectsBrowserOriginAndWrongHost(t *testing.T) {
 	f := newFixture(t)
-	req, _ := http.NewRequest(http.MethodPost, f.httpServer.URL+"/v1/root", strings.NewReader("{}"))
+	req, _ := http.NewRequest(http.MethodPost, f.httpServer.URL+"/v2/root", strings.NewReader("{}"))
 	req.Header.Set("Authorization", "Bearer "+f.token)
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Origin", "https://attacker.example")
@@ -117,7 +119,7 @@ func TestBrokerRejectsBrowserOriginAndWrongHost(t *testing.T) {
 	response.Body.Close()
 
 	f.server.SetExpectedHost("trusted.invalid:1234")
-	req, _ = http.NewRequest(http.MethodPost, f.httpServer.URL+"/v1/root", strings.NewReader("{}"))
+	req, _ = http.NewRequest(http.MethodPost, f.httpServer.URL+"/v2/root", strings.NewReader("{}"))
 	req.Header.Set("Authorization", "Bearer "+f.token)
 	req.Header.Set("Content-Type", "application/json")
 	response, err = f.client.Do(req)
@@ -132,13 +134,13 @@ func TestBrokerRejectsBrowserOriginAndWrongHost(t *testing.T) {
 
 func TestBrokerRejectsUnknownWriteAndOversizedRead(t *testing.T) {
 	f := newFixture(t)
-	response := post(t, f.client, f.httpServer.URL, f.token, "/v1/write", map[string]string{"id": "x"})
+	response := post(t, f.client, f.httpServer.URL, f.token, "/v2/write", map[string]string{"id": "x"})
 	if response.StatusCode != http.StatusNotFound {
 		t.Fatalf("write route status=%d", response.StatusCode)
 	}
 	response.Body.Close()
-	response = post(t, f.client, f.httpServer.URL, f.token, "/v1/read", ReadRequest{
-		Object: provider.Object{ID: "file", Name: "file", Kind: provider.KindFile, Size: MaxReadBytes + 1},
+	response = post(t, f.client, f.httpServer.URL, f.token, "/v2/read", ReadRequest{
+		Handle: "file",
 		Length: MaxReadBytes + 1,
 	})
 	if response.StatusCode != http.StatusBadRequest {
@@ -149,7 +151,7 @@ func TestBrokerRejectsUnknownWriteAndOversizedRead(t *testing.T) {
 
 func TestBrokerRejectsWrongContentType(t *testing.T) {
 	f := newFixture(t)
-	req, _ := http.NewRequest(http.MethodPost, f.httpServer.URL+"/v1/root", strings.NewReader("{}"))
+	req, _ := http.NewRequest(http.MethodPost, f.httpServer.URL+"/v2/root", strings.NewReader("{}"))
 	req.Header.Set("Authorization", "Bearer "+f.token)
 	req.Header.Set("Content-Type", "text/plain")
 	response, err := f.client.Do(req)

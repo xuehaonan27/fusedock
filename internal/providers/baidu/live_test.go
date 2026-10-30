@@ -15,8 +15,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/xuehaonan/fusedock/internal/accounts"
-	"github.com/xuehaonan/fusedock/pkg/provider"
+	"github.com/xuehaonan27/fusedock/internal/accounts"
+	"github.com/xuehaonan27/fusedock/pkg/provider"
 )
 
 // TestLiveBaiduDigestReadConsistency is read-only. It probes whether XPAN's

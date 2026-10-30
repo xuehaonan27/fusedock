@@ -1,22 +1,19 @@
 import FSKit
 import Foundation
 
-func fusedockInode(_ identifier: String) -> UInt64 {
-    var hash: UInt64 = 14695981039346656037
-    for byte in identifier.utf8 {
-        hash ^= UInt64(byte)
-        hash &*= 1099511628211
-    }
-    return hash == 0 ? 1 : hash
-}
-
 final class FuseDockFSItem: FSItem {
-    var object: FuseDockObject
+    private var storedObject: FuseDockObject
+    var object: FuseDockObject {
+        get { readLock.lock(); defer { readLock.unlock() }; return storedObject }
+        set { readLock.lock(); defer { readLock.unlock() }; storedObject = newValue }
+    }
     let inode: UInt64
+    let readLock = NSRecursiveLock()
+    var readHandle: UInt64 = 0
 
     init(object: FuseDockObject) {
-        self.object = object
-        self.inode = fusedockInode(object.id)
+        self.storedObject = object
+        self.inode = object.nodeID
         super.init()
     }
 
@@ -29,6 +26,6 @@ final class FuseDockFSItem: FSItem {
     }
 
     var parentIdentifier: FSItem.Identifier {
-        object.parentID.isEmpty ? .invalid : (FSItem.Identifier(rawValue: fusedockInode(object.parentID)) ?? .invalid)
+        object.parentID.isEmpty ? .invalid : (FSItem.Identifier(rawValue: object.parentNodeID) ?? .invalid)
     }
 }

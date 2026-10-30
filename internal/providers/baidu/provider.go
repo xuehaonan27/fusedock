@@ -10,7 +10,7 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/xuehaonan/fusedock/pkg/provider"
+	"github.com/xuehaonan27/fusedock/pkg/provider"
 )
 
 const (
@@ -27,18 +27,19 @@ func New() Factory { return Factory{} }
 
 func (Factory) Descriptor() provider.Descriptor {
 	return provider.Descriptor{
-		ContractVersion: provider.ContractVersion,
-		ID:              "baidu",
-		Name:            "Baidu NetDisk",
-		Description:     "Read-only access to Baidu NetDisk through the official OAuth and XPAN APIs.",
-		Capabilities:    provider.CapRead,
+		ContractVersion:  provider.ContractVersion,
+		ID:               "baidu",
+		Name:             "Baidu NetDisk",
+		Description:      "Read-only access to Baidu NetDisk through the official OAuth and XPAN APIs.",
+		Capabilities:     provider.CapRead,
+		ReadCapabilities: provider.ReadCapabilities{StableObjectID: true},
 		Options: []provider.OptionSpec{
-			{Key: "api_endpoint", Description: "XPAN API endpoint", Default: defaultAPI},
-			{Key: "oauth_endpoint", Description: "Baidu OAuth endpoint", Default: defaultOAuth},
+			{Key: "api_endpoint", Identity: true, Description: "XPAN API endpoint", Default: defaultAPI},
+			{Key: "oauth_endpoint", Identity: true, Description: "Baidu OAuth endpoint", Default: defaultOAuth},
 			{Key: "scope", Description: "OAuth scope", Default: defaultScope},
 		},
 		Credentials: []provider.CredentialSpec{
-			{Key: "app_key", Description: "Baidu application API key", Required: true},
+			{Key: "app_key", Identity: true, Description: "Baidu application API key", Required: true},
 			{Key: "secret_key", Description: "Baidu application secret key", Secret: true, Required: true},
 			{Key: "access_token", Description: "Optional saved access token", Secret: true},
 			{Key: "refresh_token", Description: "Optional saved refresh token", Secret: true},
@@ -130,7 +131,15 @@ func (s *Session) Stat(ctx context.Context, object provider.Object) (provider.Ob
 	if !ok {
 		return provider.Object{}, provider.ErrNotFound
 	}
-	return entry.object(), nil
+	fresh, err := s.client.stat(ctx, object.ID)
+	if err != nil {
+		return provider.Object{}, err
+	}
+	fresh.ParentID = entry.ParentID
+	s.mu.Lock()
+	s.known[object.ID] = fresh
+	s.mu.Unlock()
+	return fresh.object(), nil
 }
 
 func (s *Session) List(ctx context.Context, parent provider.Object) ([]provider.Object, error) {
@@ -187,6 +196,9 @@ func (s *Session) OpenRead(ctx context.Context, object provider.Object) (provide
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
+	entry.Size = object.Size
+	entry.MD5 = object.Digest.Value
+	entry.Modified = object.Modified
 	return &reader{client: s.client, entry: entry}, nil
 }
 
@@ -200,4 +212,9 @@ func optionOrDefault(options map[string]string, key, fallback string) string {
 		return strings.TrimRight(value, "/")
 	}
 	return fallback
+}
+
+// Canonical MD5 syntax alone does not certify mutation/concurrency semantics.
+func (s *Session) ReadCapabilities(context.Context) (provider.ReadCapabilities, error) {
+	return provider.ReadCapabilities{StableObjectID: true}, nil
 }

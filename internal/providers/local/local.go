@@ -13,7 +13,7 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/xuehaonan/fusedock/pkg/provider"
+	"github.com/xuehaonan27/fusedock/pkg/provider"
 )
 
 const rootID = "local://root"
@@ -30,7 +30,7 @@ func (Factory) Descriptor() provider.Descriptor {
 		Description:     "Expose a local directory through FuseDock's provider and mount layers.",
 		Capabilities:    provider.CapRead,
 		Options: []provider.OptionSpec{{
-			Key: "root", Description: "Directory to expose", Required: true,
+			Key: "root", Identity: true, Description: "Directory to expose", Required: true,
 		}},
 	}
 }

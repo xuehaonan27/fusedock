@@ -1,174 +1,65 @@
 # FuseDock 设计审阅响应
 
-| 日期 | 2026-10-26 |
+更新时间：2026-10-28。工程任务与验收以 [TODO.md](../TODO.md) 为准；独立审阅原稿保留在 [FuseDock 设计审阅意见.md](../FuseDock%20设计审阅意见.md)。本文记录本轮讨论后的正式决定。
+
+## 文件系统抽象与读取快照
+
+FuseDock 的目标是提供文件系统抽象。不可变读取快照是合法的一致性模型，保留在设计中。普通 `open()` 本身没有快照保证这一事实，不构成弱化 FuseDock 快照契约的理由。
+
+打开时选定的内容版本和大小贯穿后续读取、EOF、句柄属性、重连和关闭。目录改名保持对象身份；同路径对象替换影响新的路径解析。关闭释放 reader，再次打开按刷新策略选择版本。平台原生缓存、同对象不同版本的并发打开、FSKit item 生命周期都必须满足同一契约。
+
+使用正常平台缓存并实现失效与刷新。删除以 direct I/O 建立基线的实施要求。无版本绑定能力的 provider 明确提供普通当前版本读取，不能由此推导强版本缓存资格。
+
+## 完整 daemon 与平台解耦
+
+完整交付 daemon 的会话、控制 API、二进制数据面、peer 认证、启动恢复、挂载生命周期、重新认证、缓存管理、诊断和关闭。按职责组织任务，取消缩减功能后逐阶段补齐的交付方式。
+
+provider、namespace、VFS、cache 和服务契约与平台代码隔离。公共平台接口通过 Go 条件编译路由到 Linux FUSE、macOS FSKit 和 Windows WinFsp；Swift 和平台 SDK 类型留在 adapter 内。
+
+测试分为通用契约、go-fuse 库行为、Linux 原生挂载、macOS FSKit、Windows WinFsp。它们独立运行并报告结果，产品范围保持完整。daemon、extension、volume 和已打开读取的恢复是不同验收项。
+
+go-fuse 的同 StableAttr 去重行为已通过 macOS 临时内存接口测试复现：两个不同对象返回相同 node ID 2、inode 424242。该结果无需 `/dev/fuse`，与 Linux 实机挂载验收分开。
+
+## 内容版本与两种缓存证明
+
+对同一个 NodeKey，相同非空 ContentVersion 对应相同大小和字节。不同对象可以共享 ContentVersion，缓存键仍包含完整 NodeKey。
+
+| 路径 | 证明要求 |
 | --- | --- |
-| 审阅输入 | [FuseDock 设计审阅意见](../FuseDock%20设计审阅意见.md) |
-| 被审阅文档 | [FuseDock 设计审阅总稿](design-review.md) |
+| 精确 range 填充 | 每个远端请求绑定打开快照；条件 GET 使用 strong If-Match，并验证 206、Content-Range、总大小和响应版本 |
+| 整文件声明摘要 | 元数据声明的摘要嵌入 ContentVersion；完整下载后比对原始打开快照；验证成功再交付字节和发布缓存 |
 
-## 结论
+整文件路径保留五条规则：provider 声明、原始打开快照、完整对象覆盖、不匹配返回 ErrConflict 且不发布、修改/重复内容/并发测试通过。它无需远端 range 能力，也不授予未经验证的 range 缓存资格。
 
-审阅意见支持继续投入，同时发现了三处必须先修正的设计缺口：`ContentVersion` 的比较作用域、读取绑定的请求粒度，以及 FSKit extension 重启后的 capability 生命周期。我们接受这三项修正，并据此调整实施顺序。
+整文件校验是可选路径，不能成为所有文件打开的必经成本。它带来的首字节等待和下载放大需要单独计量；已验证的完整本地条目可以服务任意切片。
 
-新的优先级是：
+## 资源与缓存算法
 
-1. 修正契约并加入立即生效的安全护栏。
-2. 建立不可变账户身份和可验证的 provider binding。
-3. 建立 daemon、可重连的认证控制面和二进制数据面。
-4. 收紧 provider 的逐请求版本语义与 conformance。
-5. 完成 NodeKey、FUSE/FSKit 标识和 volume 生命周期。
-6. 设置元数据、内存和性能基线。
-7. 最后才实现并默认启用持久块缓存。
+全局预算覆盖保留块、填充缓冲、IPC 缓冲、metadata、节点/reader 表及临时磁盘数据。通过预算预留与并发控制管理分配，关闭和取消释放资源。
 
-multi-account、额外 provider、Windows 和写入仍排在只读基础设施稳定之后。
+缓存采用按字节计费的 2Q：首次访问 FIFO、重复访问保护队列和有界 ghost 历史。合并同一顺序访问中的相关小读，避免扫描被误判成长期热点。provider 获取粒度与持久块大小分开；连续读取扩大有界预取，seek 后缩小。
 
-## 已采纳的修正
+计数器位于公共 provider/VFS 边界。用 Finder、QuickLook、媒体 seek、并发读取和顺序浏览测量首字节延迟、网络放大、命中和内存。TTL、块大小、预取及整文件阈值由这些测量确定。
 
-### ContentVersion 的作用域
+文件索引保留目录 fan-out、后台 stat 扫描、首次命中的 header/payload 校验、原子发布和批量 mtime 更新。缓存写入失败不改变已验证读取的结果。
 
-原设计要求相同 `ContentVersion` 推出相同 `ObjectID`，这个方向错误。内容摘要天然允许两个不同对象拥有相同值。正式不变量改为：
+## 身份与路径
 
-```text
-对同一个 AccountID + ProviderID + ObjectID：
-(ContentVersion 非空且相同) => Size 相同且可读字节完全相同
+新账户使用随机 AccountID 和独立的 CredentialRef；账户别名变化不移动凭据。binding 字段明确列举并带版本。
 
-同一对象的可读字节发生变化 => ContentVersion 必须变化
-```
+配置的 scope 路径在每次挂载时解析，当前挂载持有解析出的根 NodeKey。重新挂载重新解析配置路径。volume 身份由账户和配置 scope 确定，数据缓存使用实际对象和内容版本。跨重启永久追随旧目录对象不作为默认行为。
 
-不同对象可以共享 ContentVersion。缓存键仍包含完整 NodeKey，因此共享版本不会让两个对象共享缓存身份。
+## WebDAV 与账户兼容的最终优先级
 
-### 读取绑定到每个远端请求
+现有 WebDAV 实现、测试、CLI 参数、broker 路由和 WebDAV 包引用已硬删除。当前工作不保留兼容桩，不构建替代实现，也不以维持编译作为删减范围的约束。
 
-`ExactRevisionRead` 不再只描述一次 `OpenRead`。一个 Reader 的每次 `ReadAt` 可能产生多个 HTTP 请求、续签多个签名 URL，因此每个实际远端读请求都必须绑定同一个 revision。
+WebDAV 重建、WebDAV client provider 和旧网盘账户迁移置于计划末尾，优先级最低。完整文件系统实现不依赖这些功能。
 
-- PKU 每次签名请求和对象 GET 都携带同一 `rev`；续签也必须使用该 rev。
-- 条件 GET 使用 `If-Match`，不用 `If-Range` 作为版本门槛。
-- 每次响应必须验证状态码、`Content-Range`、总大小和响应版本；任何不一致返回 `ErrConflict`。
-- 服务端忽略 `If-Match`、返回 200 全文或返回另一个 ETag 都视为冲突，不能把响应当作请求版本。
-- revision 已不存在时返回 `ErrConflict`，不能在 handle 内静默切换到最新版本。
+旧账户兼容的实际目标是保留现有登录。将来实现时，在原子更新的配置中添加 AccountID，原凭据定位值保留为固定 CredentialRef；新账户使用 AccountID 型引用。无需复制或重命名 Keychain 项，也无需跨存储迁移日志。
 
-### 摘要作为第二道校验
+## 参考依据
 
-provider 报告完整文件摘要时，把它作为额外一致性检查，而不是强版本的替代品：
-
-- 摘要必须带算法和覆盖范围；在 VFS 内部统一使用小写编码。
-- MD5 只用于兼容供应商元数据和检测意外不一致，不作为抗攻击承诺。
-- 小文件整文件下载后再计算摘要，只有与 metadata 摘要一致时才发布缓存。
-- 该路径可以让经过实测的 Baidu 小文件有限缓存，但不能让大文件 range 或未知摘要对象获得同样保证。
-- 摘要相同而内容不同仍然无法被本地发现；这必须由 provider 能力和 conformance 证据处理，不能伪装成可证明。
-
-### FSKit 生命周期
-
-一次性 bootstrap capability 不能覆盖 extension 被系统重启的情况。新的强制要求是：
-
-- daemon 使用 launchd user service 运行。
-- FSKit extension 通过 UDS/XPC 重连，并由 peer code-signing 身份认证。
-- capability 可以短期、按 target 授权和轮换，但 extension 重启后能重新认证，不依赖 CLI 留在现场。
-- 数据面使用原始二进制 body 或明确的二进制 frame；不要把文件内容放进 JSON/base64。
-
-当前 broker 的 `/v1/read` 响应已经是 `application/octet-stream`，问题主要在生命周期、请求格式和未来 UDS 协议设计，而不是现有响应已经 base64。
-
-## 已采纳的运行时调整
-
-- 元数据 TTL 按 provider/session 配置。API 型 provider 不再固定 2 秒；先测 Finder relist 和 provider 限频，再确定远程默认值。
-- 增加显式 metadata invalidation 命令；只读本地操作不应借 TTL 制造无谓远端请求。
-- 对 macOS 合成 `.metadata_never_index`，并通过 Finder/Spotlight 实机验证；处理远端同名文件冲突。
-- WebDAV 拒绝 `Depth: infinity`。
-- 每个 handle 的 4 MiB 内存块改为全局有界内存预算；持久缓存完成后进一步移除重复 per-handle block。
-- provider 内部负责网络重试和 `Retry-After`；VFS 不重复网络重试。冲突后的重新解析必须在返回任何字节前完成，且只能发生一次。
-- daemon 暴露 `reauth_required`；挂载保持存在，surface 返回 `EACCES`，CLI/GUI 重新登录后恢复。
-- 建立统一错误映射表。只读 handle 的 `ErrConflict` 映射为 `ESTALE`；写冲突仍映射为 `EBUSY`。
-- 请求 ID 从 extension/CLI 贯穿 daemon、VFS 和 provider；日志过滤秘密和签名 URL。
-- 未知 size 的导出对象不能作为普通文件暴露；先通过显式 Kind/导出策略处理。
-
-## 缓存细节裁决
-
-- cache block 默认不做每块 `fsync` 和目录 `fsync`。临时文件完整关闭后原子 rename；崩溃留下的截断文件由 header/payload 校验删除。仍提供保守的 fsync 模式用于测试或特殊部署。
-- 每个 payload 在进程内第一次命中时完整校验一次，索引记 `verified`；不是每次小读都重新哈希。
-- 启动扫描可以先验证 header 和大小，payload 延迟到首次命中；扫完前按预算已满处理，避免启动时超额写入。
-- 不使用 bbolt 维护基本块索引；文件名就是 key，目录自身充当索引。后续只有在明确规模瓶颈时才增加数据库。
-- `entries/<namespaceTag>/<keyHash前两位>/<keyHash>.blk` 做 fan-out。
-- LRU 可从 block 文件 mtime 恢复，命中时批量 touch，避免每次小读写 metadata。
-- 打开 block 必须通过受控 root、no-follow 和打开后 fstat 验证，不能先 lstat 再按路径打开。
-- 明文 owner-only cache 作为默认；逐账户可关闭持久缓存。当前不增加 per-cache encryption，前提是威胁模型明确排除恶意同用户进程。
-
-## 平台标识裁决
-
-- FSKit 在 daemon 持久映射完成前立即把 `supportsPersistentObjectIDs` 设为 `false`。
-- FUSE 使用 NodeKey 到平台节点的显式映射，不复用 bare ObjectID 的 hash。
-- 是否令 `st_ino == nodeid` 先通过 go-fuse 行为测试确认；协议 nodeid 和用户可见 `st_ino` 分开建模，不把未验证假设写进契约。
-- FSKit volume UUID 使用 `UUIDv5(namespace version, AccountID + normalized scope)` 确定性派生。
-- 同一 AccountID + scope 重复挂载默认拒绝；不同 scope 可以有不同 volume。
-
-## Provider 接口裁决
-
-不再设计一套平行、需要长期维护的 v2 interface。采用可选能力接口：
-
-```go
-type RevisionReader interface {
-    OpenReadRevision(context.Context, ObjectRevision) (Reader, error)
-}
-
-type ReadCapabilities interface {
-    ReadCapabilities(context.Context) (RevisionCapabilities, error)
-}
-```
-
-- 旧 `Session` 继续可用于当前版本读取，但缺失 revision 接口时持久缓存默认关闭。
-- factory 声明能力上限，session 探测后只能收窄。
-- 单个对象通过 Kind、空 ContentVersion 或明确的 no-cache 标志退出持久化。
-- broker wire protocol 只传 NodeKey/ID 和期望 revision；daemon 根据可信 session 状态解析 Object，不接受 extension 提供的完整远端 Object 元数据作为权威。
-- 凭据库 item key 迁移到 AccountID，账户改名不再需要迁移凭据项。
-- AccountID 旁边保存带版本的、不可逆 binding fingerprint；fingerprint 字段集由 provider 显式枚举，加载时校验，不参与随机 ID 派生。
-
-## 对十个待定项的正式决定
-
-| # | 决定 |
-| --- | --- |
-| 1 | 拆分 ContentVersion 和可选 MetadataVersion；MetadataVersion 缺失时，VFS 只用于弱 metadata 缓存。 |
-| 2 | range 读取必须每个远端请求绑定版本：revision read、经过实测的 strong If-Match GET，或不可变对象存储的等价证明。整文件路径还可使用打开快照中的 provider 声明摘要校验；前后 Stat 不够。 |
-| 3 | factory 声明上限，session 探测收窄，对象级可退出。 |
-| 4 | fingerprint 存在 AccountID 旁，不参与派生；字段集版本化并显式列举。 |
-| 5 | FUSE 用显式 node map；FSKit 先关闭 persistent IDs，之后由 daemon 持久映射或保持关闭。 |
-| 6 | 单 daemon 单 cache owner；不同 cache root 才能并行。 |
-| 7 | 文件系统作为初版索引；后台启动扫描，扫描期间保守限制写入。 |
-| 8 | owner-only 明文缓存可接受，逐账户可关闭；加密延后。 |
-| 9 | macOS 默认按账户挂载 volume；aggregate 先用于 CLI/WebDAV。名称冲突拒绝，不做隐式转义。 |
-| 10 | 用显式 Kind/能力表达 Document、Shortcut、Export；不能伪装成未知大小的普通文件。 |
-
-## 条件采纳、暂缓验证与共同约束
-
-### 条件采纳
-
-- **Baidu 小文件整文件摘要缓存**：采纳。摘要必须来自 provider 元数据并嵌入 ContentVersion，比较对象是打开快照中已保存的声明值，不是下载后重新 Stat 得到的新值。只允许 whole-file；不匹配返回 `ErrConflict` 且不写缓存。启用前仍要实测 XPAN MD5 的修改、重复内容和并发可靠性；当前扫描只有 116/823 个值是可解析的 32-hex MD5，因此默认关闭。
-- **条件 GET**：采纳，但只允许 strong ETag、每个请求携带 `If-Match`、响应 206/`Content-Range`/总大小/响应 ETag 全部校验，并实测服务器确实拒绝不匹配条件。把 200 全文或弱 ETag 当作成功的做法不采纳。
-- **不可变对象存储的响应版本校验**：可以作为精确 revision 的等价证明，但前提是对象存储保证 versionId 不可变且响应可绑定该版本；这不是普通可变后端的通用捷径。
-- **macOS 元数据索引保护**：采纳 `.metadata_never_index` 和拒绝 WebDAV `Depth: infinity`，但仍需实机验证 FSKit/Spotlight/QuickLook 是否遵守；未验证前把它当防护实验，而非已完成保证。
-
-### 暂缓验证
-
-- **FUSE `st_ino = nodeid`**：不把它直接写成跨平台契约。go-fuse 按 `StableAttr` 去重 Inode，同 `Ino` 的不同对象会复用同一个 Inode，这是必须实测的具体失败模式。Linux 测试将显式构造同 `Ino` 的两个节点，验证服务返回的是旧节点，再验证 NodeKey 映射修复。
-- **固定 30–60 秒 TTL**：采纳“per-provider 可调、默认由测量决定”；30–60 秒只是例子。测试记录 Finder 打开窗口并滚动一次后 60 秒内的 List/Stat 数，以及百度从第几次列表请求开始返回限频。
-- **FUSE/FSKit 持久映射**：暂缓到 daemon 能持久保存 NodeKey→平台 ID，并能从重启后收到的 ID 找回对象。只做 64-bit hash 再内存检测碰撞，不能声称 persistent ID。FSKit 现在先设为 false。
-- **启动时校验**：启动只需要 stat 的大小和 mtime 来建立 budget/LRU；header 和 payload 校验都推迟到首次命中。不采纳每次启动重算所有 payload 或 header，因为 10 GiB 缓存会造成无谓启动 I/O；首命中校验已经能在返回字节前发现损坏。
-
-### 共同约束，不再列为拒绝项
-
-此前把下面三项列入“不采纳”是不准确的归类；它们本来就是审阅与实现共同主张的约束：
-
-- **缓存身份使用完整 NodeKey**，不使用裸 ObjectID 或显示路径。
-- **缓存失败不能破坏有效远端读取**；写失败、损坏和预算不足必须安全降级。
-- **服务端未满足条件 GET 或 revision 绑定时返回 `ErrConflict`**。
-
-对于摘要，双方主张已收口为上面的五条整文件规则。**本地计算一个未经 provider 声明的摘要并把它当作 ContentVersion** 仍不允许；这不是审阅提出的替代方案，而是其规则明确排除的做法。除了这个未被审阅建议的做法外，审阅提出的实质方案目前没有仍被拒绝的项。
-
-## 新的验收顺序
-
-1. FSKit 不再虚假声明持久对象 ID；本机挂载不因撤回声明而退化。
-2. 账户迁移后 AccountID、凭据项和 binding fingerprint 重启稳定。
-3. extension 重启后无需 CLI 在场即可重新连接 daemon；读取响应全程为二进制。
-4. provider conformance 证明 range 的每次远端请求都绑定同一 ContentVersion；整文件摘要路径与打开快照中的声明一致；冲突不会混入任何字节。
-5. 元数据和内存基线满足 Finder 场景，块大小、预读和 TTL 有测量依据。
-6. 重启后的缓存命中、损坏恢复、LRU、并发填充和账户隔离全部通过。
-7. 只有以上门槛完成后才默认启用磁盘缓存。
-
-详细工程任务见 [TODO.md](../TODO.md)。
+- [Linux FUSE I/O](https://docs.kernel.org/filesystems/fuse/fuse-io.html)：原生缓存与 direct I/O 的行为差异。
+- [rclone VFS cache](https://rclone.org/commands/rclone_mount/#vfs-cache-mode-full)：按需缓存和 metadata fingerprint；整文件下载不是普通挂载读取的统一要求。
+- [2Q 原论文](https://www.vldb.org/conf/1994/P439.PDF)：缓存准入、扫描污染与有界历史。
+- [open(2)](https://man7.org/linux/man-pages/man2/open.2.html)：路径解析和打开对象引用的区别。

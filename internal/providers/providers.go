@@ -5,11 +5,11 @@ package providers
 import (
 	"fmt"
 
-	"github.com/xuehaonan/fusedock/internal/providers/baidu"
-	"github.com/xuehaonan/fusedock/internal/providers/broker"
-	"github.com/xuehaonan/fusedock/internal/providers/local"
-	"github.com/xuehaonan/fusedock/internal/providers/pku"
-	"github.com/xuehaonan/fusedock/pkg/provider"
+	"github.com/xuehaonan27/fusedock/internal/providers/baidu"
+	"github.com/xuehaonan27/fusedock/internal/providers/broker"
+	"github.com/xuehaonan27/fusedock/internal/providers/local"
+	"github.com/xuehaonan27/fusedock/internal/providers/pku"
+	"github.com/xuehaonan27/fusedock/pkg/provider"
 )
 
 func Builtin() (*provider.Registry, error) {

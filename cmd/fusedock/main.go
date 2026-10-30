@@ -6,7 +6,7 @@ import (
 	"os/signal"
 	"syscall"
 
-	"github.com/xuehaonan/fusedock/internal/cli"
+	"github.com/xuehaonan27/fusedock/internal/cli"
 )
 
 func main() {

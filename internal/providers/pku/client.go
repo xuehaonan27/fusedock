@@ -14,7 +14,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/xuehaonan/fusedock/pkg/provider"
+	"github.com/xuehaonan27/fusedock/pkg/provider"
+	"github.com/xuehaonan27/fusedock/pkg/providerhttp"
 )
 
 type tokenSource interface {
@@ -271,6 +272,9 @@ func (c *anyShareClient) readAt(ctx context.Context, entry pkuEntry, dest []byte
 		"docid": entry.ID, "rev": entry.Rev, "authtype": "QUERY_STRING",
 		"usehttps": strings.HasPrefix(c.base, "https:"),
 	}, &signed); err != nil {
+		if entry.Rev != "" && errors.Is(err, provider.ErrNotFound) {
+			return 0, fmt.Errorf("%w: selected PKU revision is unavailable", provider.ErrConflict)
+		}
 		return 0, err
 	}
 	resp, err := c.signedRequest(ctx, signed.Request, http.Header{"Range": {fmt.Sprintf("bytes=%d-%d", off, end)}})
@@ -278,15 +282,7 @@ func (c *anyShareClient) readAt(ctx context.Context, entry pkuEntry, dest []byte
 		return 0, err
 	}
 	defer resp.Body.Close()
-	if resp.StatusCode == http.StatusPartialContent {
-		var first, last, total int64
-		if _, err := fmt.Sscanf(resp.Header.Get("Content-Range"), "bytes %d-%d/%d", &first, &last, &total); err != nil || first != off || last != end || total != entry.Size {
-			return 0, errors.New("PKU object storage returned an inconsistent byte range")
-		}
-	} else if resp.StatusCode != http.StatusOK || off != 0 || length != entry.Size {
-		return 0, errors.New("PKU object storage did not honor the requested byte range")
-	}
-	return io.ReadFull(resp.Body, dest[:length])
+	return providerhttp.ReadResponse(resp, dest[:length], off, entry.Size, "")
 }
 
 func (c *anyShareClient) signedRequest(ctx context.Context, signed []string, headers http.Header) (*http.Response, error) {

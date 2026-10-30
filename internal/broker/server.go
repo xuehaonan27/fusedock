@@ -16,13 +16,19 @@ import (
 	"sync"
 	"time"
 
-	"github.com/xuehaonan/fusedock/pkg/provider"
+	"github.com/xuehaonan27/fusedock/pkg/provider"
 )
 
 const maxRequestBody = 64 << 10
 
 type Server struct {
-	session provider.Session
+	caps          provider.ReadCapabilities
+	revisions     map[string]provider.Object
+	revisionOrder []string
+	session       provider.Session
+	known         map[string]provider.Object
+	reads         map[string]*readHandle
+	slots         chan struct{}
 
 	mu           sync.Mutex
 	bootstrap    string
@@ -30,7 +36,7 @@ type Server struct {
 	sessionToken string
 	expectedHost string
 	onClaim      func()
-	webdav       http.Handler
+	onClose      func()
 }
 
 func NewServer(session provider.Session, bootstrap string) (*Server, error) {
@@ -40,7 +46,11 @@ func NewServer(session provider.Session, bootstrap string) (*Server, error) {
 	if len(bootstrap) < 32 {
 		return nil, errors.New("broker bootstrap token is too short")
 	}
-	return &Server{session: session, bootstrap: bootstrap}, nil
+	caps, err := provider.CapabilitiesFor(context.Background(), session)
+	if err != nil {
+		return nil, err
+	}
+	return &Server{caps: caps, revisions: map[string]provider.Object{}, session: session, bootstrap: bootstrap, known: map[string]provider.Object{}, reads: map[string]*readHandle{}, slots: make(chan struct{}, 4)}, nil
 }
 
 func (s *Server) SetExpectedHost(host string) {
@@ -60,13 +70,14 @@ func (s *Server) expectedHostMatches(host string) bool {
 // is accepted. The callback must not block on the broker's own request path.
 func (s *Server) SetOnClaim(callback func()) { s.onClaim = callback }
 
-// SetWebDAV mounts an independently authenticated read-only WebDAV access
-// surface on the same loopback listener and provider session.
-func (s *Server) SetWebDAV(handler http.Handler) { s.webdav = handler }
+func (s *Server) SetReadSlots(slots chan struct{}) { s.slots = slots }
+
+func (s *Server) SetOnClose(callback func()) { s.onClose = callback }
 
 func (s *Server) Handler() http.Handler { return http.HandlerFunc(s.serveHTTP) }
 
 func (s *Server) Serve(ctx context.Context, listener net.Listener) error {
+	defer s.Revoke()
 	s.SetExpectedHost(listener.Addr().String())
 	server := &http.Server{
 		Handler:           s.Handler(),
@@ -74,6 +85,7 @@ func (s *Server) Serve(ctx context.Context, listener net.Listener) error {
 		ReadTimeout:       10 * time.Second,
 		IdleTimeout:       2 * time.Minute,
 		MaxHeaderBytes:    16 << 10,
+		BaseContext:       func(net.Listener) context.Context { return ctx },
 	}
 	done := make(chan error, 1)
 	go func() { done <- server.Serve(listener) }()
@@ -86,7 +98,9 @@ func (s *Server) Serve(ctx context.Context, listener net.Listener) error {
 	case <-ctx.Done():
 		shutdown, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
-		_ = server.Shutdown(shutdown)
+		if err := server.Shutdown(shutdown); err != nil {
+			server.Close()
+		}
 		err := <-done
 		if errors.Is(err, http.ErrServerClosed) {
 			return nil
@@ -98,14 +112,6 @@ func (s *Server) Serve(ctx context.Context, listener net.Listener) error {
 func (s *Server) serveHTTP(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("X-Content-Type-Options", "nosniff")
-	if s.webdav != nil && (r.URL.Path == "/webdav" || strings.HasPrefix(r.URL.Path, "/webdav/")) {
-		if !s.expectedHostMatches(r.Host) {
-			http.Error(w, "unexpected broker host", http.StatusMisdirectedRequest)
-			return
-		}
-		s.webdav.ServeHTTP(w, r)
-		return
-	}
 	if r.Method != http.MethodPost {
 		writeBrokerError(w, http.StatusMethodNotAllowed, "method", "POST is required")
 		return
@@ -128,7 +134,7 @@ func (s *Server) serveHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if r.URL.Path == "/v1/claim" {
+	if r.URL.Path == "/v2/claim" {
 		s.mu.Lock()
 		valid := !s.claimed && constantEqual(token, s.bootstrap)
 		s.mu.Unlock()
@@ -153,7 +159,7 @@ func (s *Server) serveHTTP(w http.ResponseWriter, r *http.Request) {
 		if callback != nil {
 			callback()
 		}
-		writeJSON(w, http.StatusOK, ClaimResponse{Version: ProtocolVersion, Token: sess})
+		writeJSON(w, http.StatusOK, ClaimResponse{Version: ProtocolVersion, Token: sess, Capabilities: s.caps})
 		return
 	}
 
@@ -166,20 +172,28 @@ func (s *Server) serveHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	switch r.URL.Path {
-	case "/v1/root":
+	case "/v2/root":
 		s.handleRoot(w, r)
-	case "/v1/list":
+	case "/v2/list":
 		s.handleList(w, r)
-	case "/v1/lookup":
+	case "/v2/lookup":
 		s.handleLookup(w, r)
-	case "/v1/stat":
+	case "/v2/stat":
 		s.handleStat(w, r)
-	case "/v1/read":
+	case "/v2/open":
+		s.handleOpen(w, r)
+	case "/v2/release":
+		s.handleRelease(w, r)
+	case "/v2/read":
 		s.handleRead(w, r)
-	case "/v1/close":
+	case "/v2/close":
 		s.mu.Lock()
 		s.sessionToken = ""
 		s.mu.Unlock()
+		s.closeReads()
+		if s.onClose != nil {
+			defer s.onClose()
+		}
 		writeJSON(w, http.StatusOK, map[string]bool{"closed": true})
 	default:
 		writeBrokerError(w, http.StatusNotFound, "route", "unknown broker operation")
@@ -196,6 +210,7 @@ func (s *Server) handleRoot(w http.ResponseWriter, r *http.Request) {
 		writeProviderError(w, err)
 		return
 	}
+	s.remember(object)
 	writeJSON(w, http.StatusOK, object)
 }
 
@@ -209,10 +224,18 @@ func (s *Server) handleList(w http.ResponseWriter, r *http.Request) {
 		writeBrokerError(w, http.StatusBadRequest, "object", "invalid parent object ID")
 		return
 	}
-	objects, err := s.session.List(r.Context(), provider.Object{ID: request.ParentID, Kind: provider.KindDirectory})
+	parent, err := s.object(request.ParentID)
 	if err != nil {
 		writeProviderError(w, err)
 		return
+	}
+	objects, err := s.session.List(r.Context(), parent)
+	if err != nil {
+		writeProviderError(w, err)
+		return
+	}
+	for _, o := range objects {
+		s.remember(o)
 	}
 	writeJSON(w, http.StatusOK, objects)
 }
@@ -227,13 +250,19 @@ func (s *Server) handleLookup(w http.ResponseWriter, r *http.Request) {
 		writeBrokerError(w, http.StatusBadRequest, "object", "invalid lookup request")
 		return
 	}
-	objects, err := s.session.List(r.Context(), provider.Object{ID: request.ParentID, Kind: provider.KindDirectory})
+	parent, err := s.object(request.ParentID)
+	if err != nil {
+		writeProviderError(w, err)
+		return
+	}
+	objects, err := s.session.List(r.Context(), parent)
 	if err != nil {
 		writeProviderError(w, err)
 		return
 	}
 	for _, object := range objects {
 		if object.Name == request.Name {
+			s.remember(object)
 			writeJSON(w, http.StatusOK, object)
 			return
 		}
@@ -247,15 +276,21 @@ func (s *Server) handleStat(w http.ResponseWriter, r *http.Request) {
 		writeBrokerError(w, http.StatusBadRequest, "request", err.Error())
 		return
 	}
-	if !validObject(request.Object) {
+	if !validObjectID(request.ObjectID) {
 		writeBrokerError(w, http.StatusBadRequest, "object", "invalid object metadata")
 		return
 	}
-	object, err := s.session.Stat(r.Context(), request.Object)
+	known, err := s.object(request.ObjectID)
 	if err != nil {
 		writeProviderError(w, err)
 		return
 	}
+	object, err := s.session.Stat(r.Context(), known)
+	if err != nil {
+		writeProviderError(w, err)
+		return
+	}
+	s.remember(object)
 	writeJSON(w, http.StatusOK, object)
 }
 
@@ -265,7 +300,7 @@ func (s *Server) handleRead(w http.ResponseWriter, r *http.Request) {
 		writeBrokerError(w, http.StatusBadRequest, "request", err.Error())
 		return
 	}
-	if !validObject(request.Object) || request.Object.IsDir() || request.Offset < 0 || request.Length < 0 || request.Length > MaxReadBytes {
+	if request.Handle == "" || request.Offset < 0 || request.Length < 0 || request.Length > MaxReadBytes {
 		writeBrokerError(w, http.StatusBadRequest, "range", "invalid read object or range")
 		return
 	}
@@ -274,14 +309,33 @@ func (s *Server) handleRead(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		return
 	}
-	reader, err := s.session.OpenRead(r.Context(), request.Object)
-	if err != nil {
-		writeProviderError(w, err)
+	s.mu.Lock()
+	h := s.reads[request.Handle]
+	s.mu.Unlock()
+	if h == nil {
+		writeProviderError(w, provider.ErrConflict)
 		return
 	}
-	defer reader.Close()
+	select {
+	case s.slots <- struct{}{}:
+		defer func() { <-s.slots }()
+	case <-r.Context().Done():
+		writeProviderError(w, r.Context().Err())
+		return
+	}
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	if h.closed {
+		writeProviderError(w, provider.ErrConflict)
+		return
+	}
+	reader := h.reader
+	readCtx, cancel := context.WithCancel(r.Context())
+	stop := context.AfterFunc(h.ctx, cancel)
+	defer stop()
+	defer cancel()
 	buffer := make([]byte, int(request.Length))
-	n, readErr := reader.ReadAt(r.Context(), buffer, request.Offset)
+	n, readErr := reader.ReadAt(readCtx, buffer, request.Offset)
 	if n < 0 || n > len(buffer) {
 		writeBrokerError(w, http.StatusInternalServerError, "internal", "provider returned an invalid read count")
 		return
@@ -394,4 +448,151 @@ func writeJSON(w http.ResponseWriter, status int, value any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(value)
+}
+
+type readHandle struct {
+	ctx    context.Context
+	cancel context.CancelFunc
+	mu     sync.RWMutex
+	reader provider.Reader
+	closed bool
+}
+
+func (h *readHandle) close() {
+	h.cancel()
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if !h.closed {
+		h.closed = true
+		h.reader.Close()
+	}
+}
+func (s *Server) remember(o provider.Object) {
+	s.mu.Lock()
+	s.known[o.ID] = o
+	if s.caps.ExactRange && o.ContentVersion != "" {
+		key := revisionKey(o.Revision())
+		if _, exists := s.revisions[key]; !exists {
+			s.revisionOrder = append(s.revisionOrder, key)
+		}
+		s.revisions[key] = o
+		for len(s.revisionOrder) > 8192 {
+			old := s.revisionOrder[0]
+			s.revisionOrder = s.revisionOrder[1:]
+			delete(s.revisions, old)
+		}
+	}
+	s.mu.Unlock()
+}
+func (s *Server) object(id string) (provider.Object, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	o, ok := s.known[id]
+	if !ok {
+		return o, provider.ErrNotFound
+	}
+	return o, nil
+}
+func (s *Server) handleOpen(w http.ResponseWriter, r *http.Request) {
+	var request OpenRequest
+	if err := decodeJSON(r, &request); err != nil {
+		writeBrokerError(w, 400, "request", err.Error())
+		return
+	}
+	o, err := s.object(request.ObjectID)
+	if err != nil {
+		writeProviderError(w, err)
+		return
+	}
+	var reader provider.Reader
+	if request.Revision != nil {
+		if !s.caps.ExactRange || request.Revision.ObjectID != request.ObjectID {
+			writeProviderError(w, provider.ErrUnsupported)
+			return
+		}
+		s.mu.Lock()
+		snapshot, ok := s.revisions[revisionKey(*request.Revision)]
+		s.mu.Unlock()
+		if !ok {
+			writeProviderError(w, provider.ErrConflict)
+			return
+		}
+		o = snapshot
+		exact, ok := s.session.(provider.RevisionReader)
+		if !ok {
+			writeProviderError(w, provider.ErrUnsupported)
+			return
+		}
+		reader, err = exact.OpenReadRevision(r.Context(), o.Revision())
+	} else {
+		o, err = s.session.Stat(r.Context(), o)
+		if err == nil {
+			reader, err = s.session.OpenRead(r.Context(), o)
+		}
+	}
+	if err != nil {
+		writeProviderError(w, err)
+		return
+	}
+	if request.Revision == nil {
+		if snapshot, ok := reader.(provider.SnapshotReader); ok {
+			o = snapshot.Snapshot()
+		}
+	}
+	id, err := randomToken()
+	if err != nil {
+		reader.Close()
+		writeProviderError(w, err)
+		return
+	}
+	s.mu.Lock()
+	if len(s.reads) >= 4096 || s.sessionToken == "" {
+		s.mu.Unlock()
+		reader.Close()
+		writeProviderError(w, provider.ErrPermission)
+		return
+	}
+	readCtx, cancel := context.WithCancel(context.Background())
+	s.reads[id] = &readHandle{reader: reader, ctx: readCtx, cancel: cancel}
+	s.mu.Unlock()
+	writeJSON(w, 200, OpenResponse{Handle: id, Snapshot: o})
+}
+func (s *Server) handleRelease(w http.ResponseWriter, r *http.Request) {
+	var request ReleaseRequest
+	if err := decodeJSON(r, &request); err != nil {
+		writeBrokerError(w, 400, "request", err.Error())
+		return
+	}
+	s.mu.Lock()
+	h := s.reads[request.Handle]
+	delete(s.reads, request.Handle)
+	s.mu.Unlock()
+	if h != nil {
+		h.close()
+	}
+	writeJSON(w, 200, struct{}{})
+}
+func (s *Server) closeReads() {
+	s.mu.Lock()
+	reads := s.reads
+	s.reads = map[string]*readHandle{}
+	s.mu.Unlock()
+	for _, h := range reads {
+		h.close()
+	}
+}
+func (s *Server) Revoke() {
+	s.mu.Lock()
+	s.sessionToken = ""
+	s.bootstrap = ""
+	s.claimed = true
+	clear(s.known)
+	clear(s.revisions)
+	s.revisionOrder = nil
+	s.mu.Unlock()
+	s.closeReads()
+}
+
+func revisionKey(r provider.ObjectRevision) string {
+	return fmt.Sprintf("%q/%q/%d", r.ObjectID, r.ContentVersion, r.Size)
 }

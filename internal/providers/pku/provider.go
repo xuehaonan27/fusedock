@@ -7,7 +7,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/xuehaonan/fusedock/pkg/provider"
+	"github.com/xuehaonan27/fusedock/pkg/provider"
 )
 
 const rootID = "pku://root"
@@ -27,14 +27,15 @@ func New() Factory { return Factory{} }
 
 func (Factory) Descriptor() provider.Descriptor {
 	return provider.Descriptor{
-		ContractVersion: provider.ContractVersion,
-		ID:              "pku",
-		Name:            "PKU NetDisk",
-		Description:     "Read-only access to Peking University NetDisk through IAAA and AnyShare.",
-		Capabilities:    provider.CapRead,
+		ContractVersion:  provider.ContractVersion,
+		ID:               "pku",
+		Name:             "PKU NetDisk",
+		Description:      "Read-only access to Peking University NetDisk through IAAA and AnyShare.",
+		Capabilities:     provider.CapRead,
+		ReadCapabilities: provider.ReadCapabilities{StableObjectID: true, ExactRange: true},
 		Options: []provider.OptionSpec{
-			{Key: "endpoint", Description: "AnyShare endpoint", Default: defaultEndpoint},
-			{Key: "iaaa_endpoint", Description: "IAAA endpoint", Default: defaultIAAA},
+			{Key: "endpoint", Identity: true, Description: "AnyShare endpoint", Default: defaultEndpoint},
+			{Key: "iaaa_endpoint", Identity: true, Description: "IAAA endpoint", Default: defaultIAAA},
 		},
 		Credentials: []provider.CredentialSpec{
 			{Key: "username", Description: "PKU campus account", Required: true},
@@ -222,7 +223,7 @@ func fromEntry(entry pkuEntry, parent string) provider.Object {
 	}
 	return provider.Object{
 		ID: firstNonEmpty(entry.ID, entry.DocID), ParentID: parent, Name: entry.Name,
-		Kind: kind, Size: size, Version: entry.Rev, Modified: entry.Modified, Created: entry.Created,
+		Kind: kind, Size: size, Version: entry.Rev, ContentVersion: entry.Rev, MetadataVersion: entry.Modified.String(), Modified: entry.Modified, Created: entry.Created,
 	}
 }
 
@@ -231,5 +232,15 @@ func toEntry(object provider.Object) pkuEntry {
 	if object.IsDir() {
 		size = -1
 	}
-	return pkuEntry{ID: object.ID, DocID: object.ID, Name: object.Name, Size: size, Rev: object.Version, Modified: object.Modified, Created: object.Created}
+	return pkuEntry{ID: object.ID, DocID: object.ID, Name: object.Name, Size: size, Rev: firstNonEmpty(object.ContentVersion, object.Version), Modified: object.Modified, Created: object.Created}
+}
+
+func (s *Session) ReadCapabilities(context.Context) (provider.ReadCapabilities, error) {
+	return provider.ReadCapabilities{StableObjectID: true, ExactRange: true}, nil
+}
+func (s *Session) OpenReadRevision(ctx context.Context, rev provider.ObjectRevision) (provider.Reader, error) {
+	if err := rev.Validate(); err != nil {
+		return nil, err
+	}
+	return s.OpenRead(ctx, provider.Object{ID: rev.ObjectID, Kind: provider.KindFile, ContentVersion: rev.ContentVersion, Size: rev.Size})
 }

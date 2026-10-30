@@ -8,7 +8,7 @@ import (
 	"net/http"
 	"net/url"
 
-	"github.com/xuehaonan/fusedock/pkg/provider"
+	"github.com/xuehaonan27/fusedock/pkg/provider"
 )
 
 type reader struct {
@@ -46,15 +46,15 @@ func (r *reader) ReadAt(ctx context.Context, dest []byte, offset int64) (int, er
 	if resp.StatusCode == http.StatusPartialContent {
 		var first, last, total int64
 		if _, err := fmt.Sscanf(resp.Header.Get("Content-Range"), "bytes %d-%d/%d", &first, &last, &total); err != nil || first != offset || last != offset+length-1 || total != r.entry.Size {
-			return 0, errors.New("Baidu returned an inconsistent byte range")
+			return 0, fmt.Errorf("%w: inconsistent Baidu byte range", provider.ErrConflict)
 		}
-	} else if resp.StatusCode != http.StatusOK || offset != 0 {
+	} else if resp.StatusCode != http.StatusOK || offset != 0 || length != r.entry.Size {
 		if resp.StatusCode == http.StatusOK {
 			return 0, fmt.Errorf("%w: Baidu ignored the requested byte range", provider.ErrUnsupported)
 		}
 		return 0, fmt.Errorf("Baidu download HTTP %d", resp.StatusCode)
 	}
-	if resp.ContentLength >= 0 && resp.ContentLength < length {
+	if resp.ContentLength >= 0 && resp.ContentLength != length {
 		return 0, errors.New("Baidu download returned an incomplete range")
 	}
 	n, err := io.ReadFull(resp.Body, dest[:length])
@@ -63,6 +63,10 @@ func (r *reader) ReadAt(ctx context.Context, dest []byte, offset int64) (int, er
 			return n, io.ErrUnexpectedEOF
 		}
 		return n, err
+	}
+	var extra [1]byte
+	if count, err := io.ReadFull(resp.Body, extra[:]); count != 0 || err != io.EOF {
+		return 0, fmt.Errorf("%w: Baidu response exceeds selected size", provider.ErrConflict)
 	}
 	return n, nil
 }

@@ -16,7 +16,7 @@ Linux:   ~/.config/fusedock/accounts.json
 Windows: %AppData%\fusedock\accounts.json
 ```
 
-The current v1 implementation uses `dev.fusedock.accounts` with the local account name as the credential-item key. The target v2 format adds an immutable random `AccountID` and a versioned binding fingerprint, and keys credential items by `AccountID`; migration must be atomic and idempotent. The payload is versioned JSON containing provider-defined secret keys, such as a password or OAuth token, plus an opaque provider state value. FuseDock rejects account-store files with group or world permissions on Unix.
+The current v1 implementation uses `dev.fusedock.accounts` with the local account name as the credential-item key. The target format adds an immutable random `AccountID`, a versioned binding fingerprint, and a stable `CredentialRef`; new accounts use AccountID-based credential references. Existing-account conversion is a lowest-priority feature. It will preserve the existing credential reference and atomically update only account metadata, without copying or renaming system credential items. The payload is versioned JSON containing provider-defined secret keys, such as a password or OAuth token, plus an opaque provider state value. FuseDock rejects account-store files with group or world permissions on Unix.
 
 ## Add an account
 
@@ -69,8 +69,8 @@ PKU persists its access and renewable refresh cookies as opaque provider state. 
 
 1. The account store loads the saved password and state.
 2. The PKU provider binds the state to the saved endpoint, IAAA endpoint, and username.
-3. A forced refresh validates the state and rotates its token.
-4. The new state atomically replaces the old Keychain/Secret Service value.
+3. The saved access token is used until an actual authentication failure requires refresh.
+4. Changed provider state is persisted to the existing credential item; unchanged state is not rewritten.
 
 Expired state falls back to password login. Network failures do not silently fall back, because a password login would hit the same transport failure and could hide a credential problem. The account-store lock covers refresh and state writes across processes.
 

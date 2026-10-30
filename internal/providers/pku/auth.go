@@ -23,13 +23,13 @@ import (
 
 	"golang.org/x/net/html"
 
-	"github.com/xuehaonan/fusedock/pkg/provider"
+	"github.com/xuehaonan27/fusedock/pkg/provider"
 )
 
 const (
 	defaultEndpoint  = "https://disk.pku.edu.cn"
 	defaultIAAA      = "https://iaaa.pku.edu.cn"
-	userAgent        = "FuseDock/0.1 (+https://github.com/xuehaonan/fusedock)"
+	userAgent        = "FuseDock/0.1 (+https://github.com/xuehaonan27/fusedock)"
 	maxAuthBodyBytes = 4 << 20
 )
 

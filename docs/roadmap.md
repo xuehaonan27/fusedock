@@ -1,63 +1,30 @@
 # Roadmap
 
-The actionable, prioritized backlog now lives in [TODO.md](../TODO.md). This file keeps the product-level roadmap context and should be read alongside it.
+Updated 2026-10-28. [TODO.md](../TODO.md) owns the engineering plan. Work is organized by responsibility and accepted as complete functionality, without reduced daemon stages.
 
-The ordering is based on validating core contracts before multiplying surfaces and provider-specific behavior.
+## Filesystem product
 
-The first gate-test round is recorded in [prerequisite-test-results.md](prerequisite-test-results.md). FSKit persistent-ID withdrawal, WebDAV depth protection, and lazy credential writes have landed; FSKit restart reconnection, Linux FUSE identity, Baidu digest reliability, Finder/QuickLook measurements, metadata indexing behavior, and the memory cap remain open.
+FuseDock exposes cloud storage as a filesystem through Linux FUSE, macOS FSKit, and Windows WinFsp. Provider, namespace, VFS, cache, and service contracts are platform-independent; build constraints select each native adapter. CLI and future application surfaces consume the same contracts.
 
-## 0.1 Read-only vertical slice
+A version-bound read snapshot is a valid filesystem abstraction and remains part of the design. Its bytes, size, open/close lifetime, native data caching, and concurrent-open behavior must agree across the complete path. File paths are mutable directory entries; object identity survives rename. A configured scope is resolved at each mount and held as an object for that mount.
 
-- Provider registry with descriptor-driven CLI discovery.
-- Local reference provider using `os.Root` confinement.
-- PKU IAAA and AnyShare read path.
-- Metadata request coalescing and per-handle block reads.
-- Linux/macOS read-only FUSE driver.
-- Cross-platform builds for Linux, macOS, and Windows.
+## Complete foundation delivery
 
-## Next: productionize the read path
+- Immutable AccountID and explicit object/version identity for new bindings; stable CredentialRef independent of aliases.
+- Full daemon control/data APIs, authenticated reconnect, service and mount lifecycle, reauthentication, diagnostics, and resource management.
+- Provider-specific exact range or declared-digest whole-file proof; complete-file hashing is optional rather than a universal open cost.
+- Global byte/concurrency budgets, byte-budgeted 2Q, correlated-access accounting, adaptive bounded read-ahead, measured metadata policy, and persistent cache storage.
+- Native snapshot and cache coherence using normal platform caching; no direct-I/O prerequisite.
+- Separate core, go-fuse library, Linux, macOS, and Windows test suites with compile-time platform routing.
 
-- Correct the version contract, bound memory, and stop claiming FSKit persistent IDs prematurely.
-- Add immutable AccountID, binding fingerprints, and account-ID-keyed credentials.
-- Add a supervised daemon and a reconnectable, peer-authenticated control/data plane.
-- Prove per-request revision binding and establish metadata, Finder, QuickLook, and range baselines.
-- Use the recorded preflight results as gates; do not replace measured defaults with another estimate.
-- Run native FUSE acceptance on Linux and FSKit mount acceptance on macOS.
-- Add a bounded disk cache keyed by account, object ID, content version, and range.
-- Add a multi-account virtual root.
-- Add mount supervision and clean diagnostics for stale sessions.
-- Add opt-in PKU live acceptance with a dedicated test account.
+Implementation dependencies are tracked within that complete scope. Test separation does not divide the daemon into reduced releases. See [the experiment record](prerequisite-test-results.md) for evidence already collected.
 
-## Then: safe writes
+## Product coverage
 
-- Define mutation capabilities and provider revision semantics.
-- Add private write staging, `fsync`/close publication, and recovery journals.
-- Support create, overwrite, truncate, append, mkdir, remove, and same-provider rename.
-- Return `EBUSY` on a revision conflict and `EXDEV` across account or provider boundaries.
-- Add provider fixtures for interrupted uploads and concurrent remote edits.
+Multi-account views, Google Drive, OneDrive, S3, iCloud access investigation, safe writes, native application hosts, packaging, and the external provider SDK remain explicit product work. Writes require their own expected-version and recovery semantics.
 
-## Platform coverage
+## Lowest-priority features
 
-- Add an NFS bridge as a macFUSE-free fallback.
-- Add a WinFsp adapter through cgofuse with native Windows mount tests.
-- Broaden WebDAV verification against Finder and third-party clients; add write support only after safe mutation semantics.
-- Add a background service or tray supervisor for each desktop platform.
-- Harden the broker with launchd lifecycle, a peer-authenticated Unix socket/XPC transport, and release packaging.
-- Add authenticated local GUI and native host adapters.
-- Reuse provider/VFS services on mobile; do not expose a FUSE mount where the OS does not support it.
+The existing WebDAV code has been hard-deleted. A future WebDAV server is a fresh implementation against the shared contracts; a WebDAV client provider is also deferred here.
 
-## Provider coverage
-
-- Google Drive: OAuth with PKCE, shared-drive and shortcut semantics, Docs export decisions.
-- Baidu NetDisk: live acceptance, rate-limit handling, and cloud-specific file types.
-- Additional S3-compatible and WebDAV providers as lower-risk protocol implementations.
-- Provider conformance suite shared by built-in and external adapters.
-
-Each provider must state its exact read/write behavior. A common API does not make Google Docs, Baidu archives, and ordinary files semantically interchangeable.
-
-## External provider SDK
-
-- Specify a versioned sidecar protocol with capability negotiation.
-- Preserve context cancellation, random-access reads, error classes, and secret isolation.
-- Support Go in-process providers first; add non-Go sidecars only after conformance tests exist.
-- Require explicit local installation and authentication; do not auto-download executable providers.
+Existing-account migration is deferred with WebDAV. Its intended scope is preserving saved login references while adding AccountID to configuration, without moving system credential items. Neither WebDAV nor migration blocks the filesystem foundation.

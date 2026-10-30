@@ -10,7 +10,7 @@ FuseDock providers implement `pkg/provider`. A provider should be added only whe
 | Google Drive | Planned | No | No | OAuth with PKCE, shared drives, shortcuts, Google Docs export semantics |
 | Baidu NetDisk | Implemented, read-only preview | Yes | No | OAuth device flow, XPAN pagination, signed range downloads, token rotation |
 | S3-compatible | Planned | No | No | Endpoint configuration, list pagination, object ETags, multipart uploads |
-| WebDAV | Planned | No | No | Server-specific property support, locks, weak metadata, redirects |
+| WebDAV | Planned, lowest priority | No | No | Server-specific property support, locks, weak metadata, redirects |
 
 ## PKU NetDisk
 
@@ -40,7 +40,7 @@ The read adapter should validate every returned path component, include stable f
 
 ## Generic protocols
 
-WebDAV and S3-compatible services are useful low-risk providers for developing common behavior. Neither should be treated as a universal abstraction for Google Drive or Baidu: their authentication, object types, metadata, and mutation semantics still need provider-specific adapters.
+S3-compatible services can exercise shared provider behavior. The WebDAV client provider is in the lowest-priority group alongside WebDAV reconstruction and existing-account migration. Neither should be treated as a universal abstraction for Google Drive or Baidu: their authentication, object types, metadata, and mutation semantics still need provider-specific adapters.
 
 ## Adding a provider
 

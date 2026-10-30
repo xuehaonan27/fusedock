@@ -2,10 +2,10 @@
 // desktop filesystem host. It never exposes account-store secrets.
 package broker
 
-import "github.com/xuehaonan/fusedock/pkg/provider"
+import "github.com/xuehaonan27/fusedock/pkg/provider"
 
 const (
-	ProtocolVersion = 1
+	ProtocolVersion = 2
 	MaxReadBytes    = 16 << 20
 )
 
@@ -19,18 +19,30 @@ type LookupRequest struct {
 }
 
 type StatRequest struct {
-	Object provider.Object `json:"object"`
+	ObjectID string `json:"object_id"`
 }
 
+type OpenRequest struct {
+	ObjectID string                   `json:"object_id"`
+	Revision *provider.ObjectRevision `json:"revision,omitempty"`
+}
+type OpenResponse struct {
+	Handle   string          `json:"handle"`
+	Snapshot provider.Object `json:"snapshot"`
+}
+type ReleaseRequest struct {
+	Handle string `json:"handle"`
+}
 type ReadRequest struct {
-	Object provider.Object `json:"object"`
-	Offset int64           `json:"offset"`
-	Length int64           `json:"length"`
+	Handle string `json:"handle"`
+	Offset int64  `json:"offset"`
+	Length int64  `json:"length"`
 }
 
 type ClaimResponse struct {
-	Version int    `json:"version"`
-	Token   string `json:"token"`
+	Capabilities provider.ReadCapabilities `json:"capabilities"`
+	Version      int                       `json:"version"`
+	Token        string                    `json:"token"`
 }
 
 type ErrorResponse struct {

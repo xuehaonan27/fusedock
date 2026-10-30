@@ -24,15 +24,13 @@ import (
 	"github.com/spf13/pflag"
 	"golang.org/x/term"
 
-	"github.com/xuehaonan/fusedock/internal/accounts"
-	"github.com/xuehaonan/fusedock/internal/broker"
-	"github.com/xuehaonan/fusedock/internal/credentials"
-	"github.com/xuehaonan/fusedock/internal/fusefs"
-	"github.com/xuehaonan/fusedock/internal/providers"
-	"github.com/xuehaonan/fusedock/internal/vfs"
-	"github.com/xuehaonan/fusedock/internal/webdavfs"
-	"github.com/xuehaonan/fusedock/internal/webdavservice"
-	"github.com/xuehaonan/fusedock/pkg/provider"
+	"github.com/xuehaonan27/fusedock/internal/accounts"
+	"github.com/xuehaonan27/fusedock/internal/broker"
+	"github.com/xuehaonan27/fusedock/internal/credentials"
+	"github.com/xuehaonan27/fusedock/internal/platform"
+	"github.com/xuehaonan27/fusedock/internal/providers"
+	"github.com/xuehaonan27/fusedock/internal/vfs"
+	"github.com/xuehaonan27/fusedock/pkg/provider"
 )
 
 var Version = "0.1.0-dev"
@@ -79,6 +77,8 @@ func Run(ctx context.Context, args []string, streams IO) int {
 		return runProviders(args[1:], streams)
 	case "account":
 		return runAccount(ctx, args[1:], streams)
+	case "daemon":
+		return runDaemon(ctx, args[1:], streams)
 	case "broker":
 		return runBroker(ctx, args[1:], streams)
 	case "ls":
@@ -96,12 +96,14 @@ func printUsage(out io.Writer) {
 	fmt.Fprint(out, `FuseDock mounts cloud storage through a provider-neutral contract.
 
 Usage:
+  fusedock daemon <start|status|mount|unmount|stop> [flags]
   fusedock providers
   fusedock account add [flags]
   fusedock account ls [--json]
   fusedock account default <name>
+  fusedock account rename <old-name> <new-name>
   fusedock account remove <name>
-  fusedock broker start --account NAME [--config PATH] [--webdav-auth-file PATH]
+  fusedock broker start --account NAME --config PATH
   fusedock ls [flags] [provider]
   fusedock mount [flags] [provider] <mountpoint>
   fusedock version
@@ -116,7 +118,7 @@ Run 'fusedock providers' for provider IDs and their options.
 
 func runBroker(ctx context.Context, args []string, streams IO) int {
 	if len(args) == 0 || helpRequested(args) {
-		fmt.Fprintln(streams.Out, "usage: fusedock broker start --account NAME (--config PATH and/or --webdav-auth-file PATH) [flags]")
+		fmt.Fprintln(streams.Out, "usage: fusedock broker start --account NAME --config PATH [flags]")
 		return 0
 	}
 	if args[0] != "start" {
@@ -127,12 +129,7 @@ func runBroker(ctx context.Context, args []string, streams IO) int {
 	flags.SetOutput(streams.Err)
 	accountName := flags.String("account", "", "saved account to serve")
 	configPath := flags.String("config", "", "owner-only broker capability file to create")
-	webdavAuthFile := flags.String("webdav-auth-file", "", "enable WebDAV and write its owner-only login file")
-	webdavScope := flags.String("webdav-scope", "/", "provider path exposed as the WebDAV root")
-	webdavUsername := flags.String("webdav-username", "fusedock", "WebDAV Basic auth username")
-	listenAddress := flags.String("listen", "127.0.0.1:0", "loopback broker listen address; use a fixed port for stable Finder favorites")
-	var webdavOrigins []string
-	flags.StringArrayVar(&webdavOrigins, "webdav-allow-origin", nil, "exact browser origin allowed to use WebDAV (repeatable)")
+	listenAddress := flags.String("listen", "127.0.0.1:0", "loopback broker listen address")
 	var optionValues []string
 	flags.StringArrayVarP(&optionValues, "option", "o", nil, "provider option override key=value")
 	if err := flags.Parse(args[1:]); err != nil {
@@ -141,12 +138,8 @@ func runBroker(ctx context.Context, args []string, streams IO) int {
 		}
 		return 2
 	}
-	if flags.NArg() != 0 || *accountName == "" || (*configPath == "" && *webdavAuthFile == "") {
-		fmt.Fprintln(streams.Err, "usage: fusedock broker start --account NAME (--config PATH and/or --webdav-auth-file PATH) [flags]")
-		return 2
-	}
-	if *configPath != "" && *webdavAuthFile != "" && *configPath == *webdavAuthFile {
-		fmt.Fprintln(streams.Err, "fusedock: broker capability and WebDAV auth file must be different paths")
+	if flags.NArg() != 0 || *accountName == "" || *configPath == "" {
+		fmt.Fprintln(streams.Err, "usage: fusedock broker start --account NAME --config PATH [flags]")
 		return 2
 	}
 	if err := validateListenAddress(*listenAddress); err != nil {
@@ -179,7 +172,7 @@ func runBroker(ctx context.Context, args []string, streams IO) int {
 			_ = lock.Close()
 		}
 	}()
-	for _, path := range []string{*configPath, *webdavAuthFile} {
+	for _, path := range []string{*configPath} {
 		if path == "" {
 			continue
 		}
@@ -204,7 +197,8 @@ func runBroker(ctx context.Context, args []string, streams IO) int {
 		fmt.Fprintln(streams.Err, "fusedock:", err)
 		return 1
 	}
-	defer session.Close()
+	cached := vfs.New(session, 2*time.Second)
+	defer cached.Close()
 	listener, err := net.Listen("tcp4", *listenAddress)
 	if err != nil {
 		fmt.Fprintln(streams.Err, "fusedock: create broker listener:", err)
@@ -216,7 +210,7 @@ func runBroker(ctx context.Context, args []string, streams IO) int {
 		fmt.Fprintln(streams.Err, "fusedock: generate broker capability:", err)
 		return 1
 	}
-	server, err := broker.NewServer(session, bootstrap)
+	server, err := broker.NewServer(cached, bootstrap)
 	if err != nil {
 		fmt.Fprintln(streams.Err, "fusedock:", err)
 		return 1
@@ -225,37 +219,6 @@ func runBroker(ctx context.Context, args []string, streams IO) int {
 	server.SetExpectedHost(listener.Addr().String())
 	if *configPath != "" {
 		server.SetOnClaim(func() { _ = os.Remove(*configPath) })
-	}
-	var webdavEndpoint string
-	if *webdavAuthFile != "" {
-		webdavToken, err := newCapability()
-		if err != nil {
-			fmt.Fprintln(streams.Err, "fusedock: generate WebDAV token:", err)
-			return 1
-		}
-		fs, err := webdavfs.New(ctx, vfs.New(session, 2*time.Second), *webdavScope)
-		if err != nil {
-			fmt.Fprintln(streams.Err, "fusedock: initialize WebDAV scope:", err)
-			return 1
-		}
-		service, err := webdavservice.New(webdavservice.Options{
-			FileSystem: fs, Username: *webdavUsername, Token: webdavToken,
-			Prefix: "/webdav", AllowedOrigins: webdavOrigins,
-		})
-		if err != nil {
-			fmt.Fprintln(streams.Err, "fusedock: initialize WebDAV:", err)
-			return 1
-		}
-		server.SetWebDAV(service.Handler())
-		webdavEndpoint = endpoint + "/webdav/"
-		if err := credentials.WritePrivate(*webdavAuthFile, map[string][]byte{
-			"endpoint": []byte(webdavEndpoint), "username": []byte(*webdavUsername),
-			"password": []byte(webdavToken), "scope": []byte(*webdavScope),
-		}); err != nil {
-			fmt.Fprintln(streams.Err, "fusedock: write WebDAV auth file:", err)
-			return 1
-		}
-		defer func() { _ = os.Remove(*webdavAuthFile) }()
 	}
 	if *configPath != "" {
 		if err := credentials.WritePrivate(*configPath, map[string][]byte{
@@ -276,10 +239,6 @@ func runBroker(ctx context.Context, args []string, streams IO) int {
 		if runtime.GOOS == "darwin" {
 			fmt.Fprintf(streams.Out, "Mount with: mount -t fusedock %s MOUNTPOINT\n", *configPath)
 		}
-	}
-	if webdavEndpoint != "" {
-		fmt.Fprintf(streams.Out, "WebDAV: %s\n", webdavEndpoint)
-		fmt.Fprintf(streams.Out, "WebDAV login file: %s\n", *webdavAuthFile)
 	}
 	fmt.Fprintln(streams.Out, "Press Ctrl-C to stop the broker. Temporary access files are removed on exit.")
 	if err := <-serveDone; err != nil {
@@ -396,10 +355,15 @@ func (f *providerFlags) openAccount(ctx context.Context, factory provider.Factor
 	if err := validateInputs(descriptor, options, storedSecrets, ""); err != nil {
 		return nil, err
 	}
+	actual := account
+	actual.BindingFields = provider.BindingFields(descriptor, options, storedSecrets)
+	if account.AccountID != "" && actual.BindingFingerprint() != account.Binding {
+		return nil, errors.New("provider options differ from the saved account binding")
+	}
 	request := provider.OpenRequest{
 		Username: account.Username, Secrets: storedSecrets, Options: options, State: state, Prompt: prompt,
 		SaveState: func(ctx context.Context, data []byte) error {
-			return store.SaveState(ctx, account.Name, account.Provider, account.Username, data)
+			return store.SaveBoundState(ctx, account, data)
 		},
 	}
 	return factory.Open(ctx, request)
@@ -662,7 +626,7 @@ func runProviders(args []string, streams IO) int {
 
 func runAccount(ctx context.Context, args []string, streams IO) int {
 	if len(args) == 0 || helpRequested(args) {
-		fmt.Fprintln(streams.Out, "usage: fusedock account <add|ls|default|remove> [flags]")
+		fmt.Fprintln(streams.Out, "usage: fusedock account <add|ls|default|rename|remove> [flags]")
 		return 0
 	}
 	switch args[0] {
@@ -672,12 +636,31 @@ func runAccount(ctx context.Context, args []string, streams IO) int {
 		return runAccountLS(ctx, args[1:], streams)
 	case "default":
 		return runAccountDefault(ctx, args[1:], streams)
+	case "rename":
+		return runAccountRename(ctx, args[1:], streams)
 	case "remove", "rm":
 		return runAccountRemove(ctx, args[1:], streams)
 	default:
 		fmt.Fprintf(streams.Err, "fusedock account: unknown command %q\n", args[0])
 		return 2
 	}
+}
+
+func runAccountRename(ctx context.Context, args []string, streams IO) int {
+	if len(args) != 2 {
+		fmt.Fprintln(streams.Err, "usage: fusedock account rename <old-name> <new-name>")
+		return 2
+	}
+	store, err := accountStore(streams)
+	if err == nil {
+		err = store.Rename(ctx, args[0], args[1])
+	}
+	if err != nil {
+		fmt.Fprintln(streams.Err, "fusedock:", err)
+		return 1
+	}
+	fmt.Fprintf(streams.Out, "Renamed account: %s → %s\n", args[0], args[1])
+	return 0
 }
 
 func runAccountAdd(ctx context.Context, args []string, streams IO) int {
@@ -807,7 +790,8 @@ func runAccountAdd(ctx context.Context, args []string, streams IO) int {
 		fmt.Fprintln(streams.Err, "fusedock:", err)
 		return 1
 	}
-	account := accounts.Account{Name: *name, Provider: *providerID, Username: *username, Options: options}
+	bindingFields := provider.BindingFields(descriptor, options, secrets)
+	account := accounts.Account{Name: *name, Provider: *providerID, Username: *username, Options: options, BindingFields: bindingFields}
 	if err := store.AddWithState(ctx, account, secrets, initialState, *makeDefault, *replace); err != nil {
 		fmt.Fprintln(streams.Err, "fusedock:", err)
 		return 1
@@ -1115,7 +1099,7 @@ func runMount(ctx context.Context, args []string, streams IO) int {
 		fmt.Fprintf(streams.Err, "fusedock: unknown provider %q\n", providerID)
 		return 2
 	}
-	if err := fusefs.Preflight(mountpoint); err != nil {
+	if err := platform.Preflight(mountpoint); err != nil {
 		fmt.Fprintln(streams.Err, "fusedock:", err)
 		return 1
 	}
@@ -1127,7 +1111,7 @@ func runMount(ctx context.Context, args []string, streams IO) int {
 	defer session.Close()
 	cached := vfs.New(session, *cacheTTL)
 	fmt.Fprintf(streams.Err, "Mounting %s at %s (read-only). Ctrl-C unmounts.\n", factory.Descriptor().Name, mountpoint)
-	if err := fusefs.Mount(ctx, cached, mountpoint, fusefs.Options{
+	if err := platform.Mount(ctx, cached, mountpoint, platform.Options{
 		ReadOnly: true, AttrTTL: *attrTTL, EntryTTL: *entryTTL, Debug: *debug, VolumeName: *volumeName,
 	}); err != nil {
 		fmt.Fprintln(streams.Err, "fusedock:", err)

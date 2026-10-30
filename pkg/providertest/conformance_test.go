@@ -5,7 +5,7 @@ import (
 	"io"
 	"testing"
 
-	"github.com/xuehaonan/fusedock/pkg/provider"
+	"github.com/xuehaonan27/fusedock/pkg/provider"
 )
 
 type memorySession struct{ data []byte }

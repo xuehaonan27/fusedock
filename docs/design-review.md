@@ -1,11 +1,14 @@
 # FuseDock 设计审阅总稿
 
+> Historical review snapshot (2026-10-26). Current implementation decisions and priorities are maintained in [TODO.md](../TODO.md), [namespace-contract.md](namespace-contract.md), and [persistent-block-cache.md](persistent-block-cache.md). On 2026-10-28 the WebDAV code and tests were hard-deleted. WebDAV reconstruction and existing-account conversion are the lowest-priority features. The current plan retains coherent read snapshots, complete daemon delivery, compile-time platform isolation, and byte-budgeted 2Q; earlier rollout and credential-migration proposals below are superseded.
+
+
 | 文档日期 | 2026-10-24 |
 | --- | --- |
 | 对应代码快照 | `620a358cb4ae7116fac966962e8679f446403075` |
 | 审阅目的 | 让没有项目上下文的独立审阅者评估 FuseDock 的整体设计，重点判断 namespace、版本语义、持久缓存和跨平台挂载边界是否足以支撑后续实现。 |
 
-2026-10-26 的独立审阅已审阅本文快照 `620a358`。本文已根据审阅意见修正 ContentVersion 作用域、逐请求读取绑定、FSKit 生命周期、缓存写盘策略和平台标识方案；接受与未逐字采纳的裁决见 [design-review-response.md](design-review-response.md)。项目执行顺序以 [TODO.md](../TODO.md) 为准。
+2026-10-26 的独立审阅已审阅本文快照 `620a358`。本文保留当时修正 ContentVersion 作用域、逐请求读取绑定、FSKit 生命周期、缓存写盘策略和平台标识方案的历史快照；当前裁决见 [design-review-response.md](design-review-response.md)。项目执行顺序以 [TODO.md](../TODO.md) 为准。
 
 ## 0. 阅读说明
 

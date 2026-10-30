@@ -8,8 +8,8 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/xuehaonan/fusedock/pkg/provider"
-	"github.com/xuehaonan/fusedock/pkg/providertest"
+	"github.com/xuehaonan27/fusedock/pkg/provider"
+	"github.com/xuehaonan27/fusedock/pkg/providertest"
 )
 
 func TestSessionReadsWithinRoot(t *testing.T) {

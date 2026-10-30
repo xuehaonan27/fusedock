@@ -5,14 +5,17 @@ import (
 	"errors"
 	"io"
 	"net"
+	"net/http"
+	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"testing"
 	"time"
 
-	brokerapi "github.com/xuehaonan/fusedock/internal/broker"
-	"github.com/xuehaonan/fusedock/internal/providers/local"
-	"github.com/xuehaonan/fusedock/pkg/provider"
+	brokerapi "github.com/xuehaonan27/fusedock/internal/broker"
+	"github.com/xuehaonan27/fusedock/internal/providers/local"
+	"github.com/xuehaonan27/fusedock/pkg/provider"
 )
 
 const bootstrap = "0123456789abcdef0123456789abcdef"
@@ -120,7 +123,15 @@ func TestBrokerProviderValidatesEndpoint(t *testing.T) {
 }
 
 func TestBrokerReaderRejectsClosedHandle(t *testing.T) {
-	r := &reader{session: &Session{}, object: provider.Object{ID: "file", Name: "file", Kind: provider.KindFile, Size: 1}}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v2/release" {
+			t.Error(r.URL.Path)
+		}
+		w.WriteHeader(200)
+	}))
+	defer server.Close()
+	base, _ := url.Parse(server.URL)
+	r := &reader{handle: "test", session: &Session{client: &client{base: base, transport: brokerTransport(base)}}, object: provider.Object{ID: "file", Name: "file", Kind: provider.KindFile, Size: 1}}
 	if err := r.Close(); err != nil {
 		t.Fatal(err)
 	}

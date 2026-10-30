@@ -64,7 +64,9 @@ extension FuseDockFSVolume {
         }
         DispatchQueue.global(qos: .userInitiated).async {
             do {
-                let object = try self.bridge.stat(id: fsItem.object.id)
+                fsItem.readLock.lock()
+                defer { fsItem.readLock.unlock() }
+                let object = fsItem.object.isDirectory ? try self.bridge.stat(id: fsItem.object.id) : fsItem.object
                 fsItem.object = object
                 replyHandler(self.attributes(for: object, desired: desiredAttributes), nil)
             } catch {
@@ -93,7 +95,7 @@ extension FuseDockFSVolume {
         DispatchQueue.global(qos: .userInitiated).async {
             do {
                 let object = try self.bridge.lookup(parentID: parent.object.id, name: childName)
-                let child = self.item(for: object)
+                let child = try self.item(for: object)
                 replyHandler(child, FSFileName(string: object.name), nil)
             } catch {
                 replyHandler(nil, nil, Self.posixError(for: error))
@@ -106,8 +108,11 @@ extension FuseDockFSVolume {
             replyHandler(POSIXError(.EINVAL))
             return
         }
+        fsItem.readLock.lock()
+        if fsItem.readHandle != 0 { bridge.closeRead(handle: fsItem.readHandle); fsItem.readHandle = 0 }
+        fsItem.readLock.unlock()
         itemQueue.sync {
-            if fsItem !== rootItem {
+            if fsItem !== rootItem && items[fsItem.object.id] === fsItem {
                 items.removeValue(forKey: fsItem.object.id)
             }
         }
@@ -131,7 +136,7 @@ extension FuseDockFSVolume {
                 let objects = try self.bridge.list(parentID: parent.object.id)
                 let start = min(Int(cookie.rawValue), objects.count)
                 for index in start..<objects.count {
-                    let child = self.item(for: objects[index])
+                    let child = try self.item(for: objects[index])
                     let attrs = attributes.map { self.attributes(for: objects[index], desired: $0) }
                     let packed = packer.packEntry(
                         name: FSFileName(string: objects[index].name),
@@ -206,24 +211,59 @@ extension FuseDockFSVolume {
         replyHandler(nil, POSIXError(.ENOTSUP))
     }
 
-    func openItem(
+    func open(
         _ item: FSItem,
         modes: FSVolume.OpenModes,
-        replyHandler: @escaping ((any Error)?) -> Void
+        cacheMode: FSVolume.DataCacheMode,
+        context: FSContext,
+        replyHandler reply: @escaping @Sendable (FSOpenItemResult?, (any Error)?) -> Void
     ) {
-        if modes.contains(.write) {
-            replyHandler(POSIXError(.EROFS))
-        } else {
-            replyHandler(nil)
+        guard !modes.contains(.write) else { reply(nil, POSIXError(.EROFS)); return }
+        guard let fsItem = item as? FuseDockFSItem else { reply(nil, POSIXError(.EINVAL)); return }
+        if fsItem.object.isDirectory {
+            reply(FSOpenItemResult(grantedCoherency: .noCache), nil)
+            return
+        }
+        DispatchQueue.global(qos: .userInitiated).async {
+            fsItem.readLock.lock()
+            do {
+                if fsItem.readHandle == 0 {
+                    let opened = try self.bridge.openRead(object: fsItem.object)
+                    fsItem.readHandle = opened.handle
+                    fsItem.object = opened.snapshot
+                }
+                fsItem.readLock.unlock()
+                let coherency: FSVolume.KernelCacheCoherencyType = cacheMode == .none ? .noCache : .readCache
+                reply(FSOpenItemResult(grantedCoherency: coherency), nil)
+            } catch {
+                fsItem.readLock.unlock()
+                reply(nil, Self.posixError(for: error))
+            }
         }
     }
 
-    func closeItem(
+    func upgrade(
         _ item: FSItem,
-        modes: FSVolume.OpenModes,
-        replyHandler: @escaping ((any Error)?) -> Void
+        cacheMode: FSVolume.DataCacheMode,
+        context: FSContext,
+        replyHandler reply: @escaping @Sendable (FSUpgradeItemResult?, (any Error)?) -> Void
     ) {
-        replyHandler(nil)
+        let coherency: FSVolume.KernelCacheCoherencyType = cacheMode == .none ? .noCache : .readCache
+        reply(FSUpgradeItemResult(grantedCoherency: coherency), nil)
+    }
+
+    func close(
+        _ item: FSItem,
+        context: FSContext,
+        replyHandler reply: @escaping @Sendable () -> Void
+    ) {
+        guard let fsItem = item as? FuseDockFSItem else { reply(); return }
+        fsItem.readLock.lock()
+        let handle = fsItem.readHandle
+        fsItem.readHandle = 0
+        fsItem.readLock.unlock()
+        if handle != 0 { bridge.closeRead(handle: handle) }
+        reply()
     }
 
     func read(
@@ -239,8 +279,12 @@ extension FuseDockFSVolume {
         }
         DispatchQueue.global(qos: .userInitiated).async {
             do {
+                fsItem.readLock.lock()
+                let handle = fsItem.readHandle
+                fsItem.readLock.unlock()
+                guard handle != 0 else { replyHandler(0, POSIXError(.EBADF)); return }
                 let count = try self.bridge.read(
-                    id: fsItem.object.id,
+                    handle: handle,
                     offset: Int64(offset),
                     length: length,
                     into: buffer
@@ -270,10 +314,10 @@ extension FuseDockFSVolume {
         if desired.isAttributeWanted(.size) { attrs.size = UInt64(max(0, object.size)) }
         if desired.isAttributeWanted(.allocSize) { attrs.allocSize = UInt64(max(0, object.size)) }
         if desired.isAttributeWanted(.fileID) {
-            attrs.fileID = FSItem.Identifier(rawValue: fusedockInode(object.id)) ?? .invalid
+            attrs.fileID = FSItem.Identifier(rawValue: object.nodeID) ?? .invalid
         }
         if desired.isAttributeWanted(.parentID) {
-            let parent = object.parentID.isEmpty ? 0 : fusedockInode(object.parentID)
+            let parent = object.parentID.isEmpty ? 0 : object.parentNodeID
             attrs.parentID = FSItem.Identifier(rawValue: parent) ?? .invalid
         }
         if desired.isAttributeWanted(.type) { attrs.type = object.isDirectory ? .directory : .file }
@@ -293,7 +337,7 @@ extension FuseDockFSVolume {
         let message = error.localizedDescription.lowercased()
         if message.contains("not found") { return POSIXError(.ENOENT) }
         if message.contains("permission") { return POSIXError(.EACCES) }
-        if message.contains("changed") { return POSIXError(.EBUSY) }
+        if message.contains("changed") { return POSIXError(.ESTALE) }
         if message.contains("unsupported") { return POSIXError(.ENOTSUP) }
         return POSIXError(.EIO, userInfo: [NSLocalizedDescriptionKey: error.localizedDescription])
     }

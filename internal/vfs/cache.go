@@ -1,163 +1,203 @@
-// Package vfs provides driver-independent caching over a provider session.
-// Mutations and write-back deliberately live outside this package until the
-// provider contract has a common revision-conflict model.
+// Package vfs owns filesystem read snapshots and shared metadata/data caches.
 package vfs
 
 import (
+	"container/list"
 	"context"
 	"sync"
+	"sync/atomic"
 	"time"
 
-	"github.com/xuehaonan/fusedock/pkg/provider"
+	"github.com/xuehaonan27/fusedock/internal/blockcache"
+	"github.com/xuehaonan27/fusedock/internal/namespace"
+	"github.com/xuehaonan27/fusedock/pkg/provider"
 )
 
-const maxCacheEntries = 4096
+const metadataBudget = int64(8 << 20)
 
-type cachedList struct {
-	expires time.Time
+type metadataEntry struct {
+	key     string
 	objects []provider.Object
+	expires time.Time
+	cost    int64
+	elem    *list.Element
 }
-
-type listFlight struct {
+type metadataFlight struct {
 	done    chan struct{}
+	cancel  context.CancelFunc
+	waiters int
 	objects []provider.Object
 	err     error
+	epoch   uint64
 }
-
-type cachedStat struct {
-	expires time.Time
-	object  provider.Object
-}
-
-type statFlight struct {
-	done   chan struct{}
-	object provider.Object
-	err    error
-}
-
-// Session coalesces concurrent metadata requests and retains short-lived
-// snapshots. Read handles always go directly to the provider.
+type Counters struct{ List, Stat, Read, LatencyNanos, QueueNanos, Cancellations atomic.Uint64 }
 type Session struct {
 	provider.Session
-	ttl time.Duration
-
-	mu       sync.Mutex
-	lists    map[string]cachedList
-	listWait map[string]*listFlight
-	stats    map[string]cachedStat
-	statWait map[string]*statFlight
+	ttl                   time.Duration
+	namespace             namespace.Namespace
+	blocks                *blockcache.Cache
+	ownsCache, persistent bool
+	wholeFileLimit        int64
+	ctx                   context.Context
+	cancel                context.CancelFunc
+	readersMu             sync.Mutex
+	readers               map[*reader]struct{}
+	closeOnce             sync.Once
+	closeErr              error
+	mu                    sync.Mutex
+	metadata              map[string]*metadataEntry
+	waiting               map[string]*metadataFlight
+	recency               list.List
+	metadataBytes         int64
+	epoch                 uint64
+	metadataSlots         chan struct{}
+	metadataWorkers       sync.WaitGroup
+	Counters              Counters
 }
 
 func New(session provider.Session, ttl time.Duration) *Session {
-	if ttl < 0 {
-		ttl = 0
+	id, err := namespace.NewAccountID()
+	if err != nil {
+		panic(err)
 	}
-	return &Session{
-		Session: session, ttl: ttl,
-		lists: make(map[string]cachedList), listWait: make(map[string]*listFlight),
-		stats: make(map[string]cachedStat), statWait: make(map[string]*statFlight),
+	s, err := NewWithOptions(session, Options{Namespace: namespace.Namespace{AccountID: id, ProviderID: "session"}, MetadataTTL: ttl})
+	if err != nil {
+		panic(err)
 	}
+	return s
 }
-
 func (s *Session) Root(ctx context.Context) (provider.Object, error) {
-	return s.stat(ctx, provider.Object{}, true)
+	return s.Stat(ctx, provider.Object{})
 }
-
-func (s *Session) List(ctx context.Context, parent provider.Object) ([]provider.Object, error) {
-	if s.ttl == 0 {
-		return s.Session.List(ctx, parent)
+func (s *Session) Stat(ctx context.Context, o provider.Object) (provider.Object, error) {
+	key := "stat\x00" + o.ID
+	objects, err := s.load(ctx, key, func(ctx context.Context) ([]provider.Object, error) {
+		s.Counters.Stat.Add(1)
+		var object provider.Object
+		var err error
+		if o.ID == "" {
+			object, err = s.Session.Root(ctx)
+		} else {
+			object, err = s.Session.Stat(ctx, o)
+		}
+		return []provider.Object{object}, err
+	})
+	if err != nil {
+		return provider.Object{}, err
 	}
+	return objects[0], nil
+}
+func (s *Session) List(ctx context.Context, parent provider.Object) ([]provider.Object, error) {
+	return s.load(ctx, "list\x00"+parent.ID, func(ctx context.Context) ([]provider.Object, error) {
+		s.Counters.List.Add(1)
+		return s.Session.List(ctx, parent)
+	})
+}
+func objectCost(o provider.Object) int64 {
+	return int64(256 + len(o.ID) + len(o.ParentID) + len(o.Name) + len(o.Version) + len(o.ContentVersion) + len(o.MetadataVersion) + len(o.Digest.Value))
+}
+func (s *Session) load(ctx context.Context, key string, fetch func(context.Context) ([]provider.Object, error)) ([]provider.Object, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
 	s.mu.Lock()
-	if item, ok := s.lists[parent.ID]; ok && time.Now().Before(item.expires) {
-		result := append([]provider.Object(nil), item.objects...)
+	if err := s.ctx.Err(); err != nil {
+		s.mu.Unlock()
+		return nil, err
+	}
+	if e := s.metadata[key]; e != nil && time.Now().Before(e.expires) {
+		s.recency.MoveToFront(e.elem)
+		result := append([]provider.Object(nil), e.objects...)
 		s.mu.Unlock()
 		return result, nil
 	}
-	if flight := s.listWait[parent.ID]; flight != nil {
-		s.mu.Unlock()
-		select {
-		case <-flight.done:
-			return append([]provider.Object(nil), flight.objects...), flight.err
-		case <-ctx.Done():
-			return nil, ctx.Err()
-		}
+	f := s.waiting[key]
+	if f == nil {
+		fillCtx, cancel := context.WithCancel(s.ctx)
+		f = &metadataFlight{done: make(chan struct{}), cancel: cancel, epoch: s.epoch}
+		s.waiting[key] = f
+		s.metadataWorkers.Add(1)
+		go s.fillMetadata(fillCtx, key, f, fetch)
 	}
-	flight := &listFlight{done: make(chan struct{})}
-	s.listWait[parent.ID] = flight
+	f.waiters++
 	s.mu.Unlock()
-
-	objects, err := s.Session.List(ctx, parent)
-	result := append([]provider.Object(nil), objects...)
+	select {
+	case <-f.done:
+	case <-ctx.Done():
+	}
 	s.mu.Lock()
-	flight.objects, flight.err = result, err
-	delete(s.listWait, parent.ID)
-	if err == nil {
-		if len(s.lists) >= maxCacheEntries {
-			clear(s.lists)
-		}
-		s.lists[parent.ID] = cachedList{expires: time.Now().Add(s.ttl), objects: append([]provider.Object(nil), result...)}
-	}
-	close(flight.done)
-	s.mu.Unlock()
-	return result, err
-}
-
-func (s *Session) Stat(ctx context.Context, object provider.Object) (provider.Object, error) {
-	return s.stat(ctx, object, object.ID == "")
-}
-
-func (s *Session) stat(ctx context.Context, object provider.Object, root bool) (provider.Object, error) {
-	if s.ttl == 0 {
-		if root {
-			return s.Session.Root(ctx)
-		}
-		return s.Session.Stat(ctx, object)
-	}
+	defer s.mu.Unlock()
+	f.waiters--
 	if err := ctx.Err(); err != nil {
-		return provider.Object{}, err
-	}
-	key := object.ID
-	if key == "" {
-		key = "\x00root"
-	}
-	s.mu.Lock()
-	if item, ok := s.stats[key]; ok && time.Now().Before(item.expires) {
-		s.mu.Unlock()
-		return item.object, nil
-	}
-	if flight := s.statWait[key]; flight != nil {
-		s.mu.Unlock()
-		select {
-		case <-flight.done:
-			return flight.object, flight.err
-		case <-ctx.Done():
-			return provider.Object{}, ctx.Err()
+		s.Counters.Cancellations.Add(1)
+		if f.waiters == 0 {
+			f.cancel()
+			if s.waiting[key] == f {
+				delete(s.waiting, key)
+			}
 		}
+		return nil, err
 	}
-	flight := &statFlight{done: make(chan struct{})}
-	s.statWait[key] = flight
-	s.mu.Unlock()
-
-	var result provider.Object
+	return append([]provider.Object(nil), f.objects...), f.err
+}
+func (s *Session) fillMetadata(ctx context.Context, key string, f *metadataFlight, fetch func(context.Context) ([]provider.Object, error)) {
+	defer s.metadataWorkers.Done()
+	defer f.cancel()
+	queued := time.Now()
+	var objects []provider.Object
 	var err error
-	if root {
-		result, err = s.Session.Root(ctx)
-	} else {
-		result, err = s.Session.Stat(ctx, object)
+	select {
+	case s.metadataSlots <- struct{}{}:
+		s.Counters.QueueNanos.Add(uint64(time.Since(queued)))
+		start := time.Now()
+		objects, err = fetch(ctx)
+		s.Counters.LatencyNanos.Add(uint64(time.Since(start)))
+		<-s.metadataSlots
+	case <-ctx.Done():
+		err = ctx.Err()
 	}
 	s.mu.Lock()
-	flight.object, flight.err = result, err
-	delete(s.statWait, key)
-	if err == nil {
-		if len(s.stats) >= maxCacheEntries {
-			clear(s.stats)
-		}
-		s.stats[key] = cachedStat{expires: time.Now().Add(s.ttl), object: result}
+	defer s.mu.Unlock()
+	f.objects, f.err = objects, err
+	if s.waiting[key] == f {
+		delete(s.waiting, key)
 	}
-	close(flight.done)
-	s.mu.Unlock()
-	return result, err
+	cost := int64(len(key) + 128)
+	for _, o := range objects {
+		cost += objectCost(o)
+	}
+	if err == nil && ctx.Err() == nil && s.ttl > 0 && f.epoch == s.epoch && cost <= metadataBudget {
+		if old := s.metadata[key]; old != nil {
+			s.removeMetadata(old)
+		}
+		for s.metadataBytes+cost > metadataBudget {
+			s.removeMetadata(s.recency.Back().Value.(*metadataEntry))
+		}
+		e := &metadataEntry{key: key, objects: objects, expires: time.Now().Add(s.ttl), cost: cost}
+		e.elem = s.recency.PushFront(e)
+		s.metadata[key] = e
+		s.metadataBytes += cost
+	}
+	close(f.done)
+}
+func (s *Session) removeMetadata(e *metadataEntry) {
+	delete(s.metadata, e.key)
+	s.recency.Remove(e.elem)
+	s.metadataBytes -= e.cost
+}
+func (s *Session) Invalidate(id string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.epoch++
+	if id == "" {
+		clear(s.metadata)
+		s.recency.Init()
+		s.metadataBytes = 0
+		return
+	}
+	for _, key := range []string{"stat\x00" + id, "list\x00" + id} {
+		if e := s.metadata[key]; e != nil {
+			s.removeMetadata(e)
+		}
+	}
 }

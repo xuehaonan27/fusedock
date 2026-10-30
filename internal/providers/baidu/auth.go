@@ -9,7 +9,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/xuehaonan/fusedock/pkg/provider"
+	"github.com/xuehaonan27/fusedock/pkg/provider"
 )
 
 // Authorize starts Baidu's OAuth device-code flow. The browser never receives

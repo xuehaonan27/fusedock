@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/xuehaonan/fusedock/pkg/provider"
+	"github.com/xuehaonan27/fusedock/pkg/provider"
 )
 
 type fakeSession struct {

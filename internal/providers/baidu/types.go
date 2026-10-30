@@ -2,9 +2,10 @@ package baidu
 
 import (
 	"fmt"
+	"path"
 	"time"
 
-	"github.com/xuehaonan/fusedock/pkg/provider"
+	"github.com/xuehaonan27/fusedock/pkg/provider"
 )
 
 type meta struct {
@@ -24,9 +25,16 @@ func (m meta) object() provider.Object {
 		kind, size = provider.KindDirectory, 0
 	}
 	version := fmt.Sprintf("%d:%d:%s", m.Modified.Unix(), size, m.MD5)
+	digest := provider.Digest{Algorithm: "md5", Value: m.MD5}
+	contentVersion := ""
+	if digest.Valid() && !m.Dir {
+		contentVersion = version
+	} else {
+		digest = provider.Digest{}
+	}
 	return provider.Object{
 		ID: m.ID, ParentID: m.ParentID, Name: m.Name, Kind: kind, Size: size,
-		Version: version, Modified: m.Modified,
+		Version: version, MetadataVersion: version, ContentVersion: contentVersion, Digest: digest, Modified: m.Modified,
 	}
 }
 
@@ -59,7 +67,7 @@ type fileInfo struct {
 func (f fileInfo) meta(parent string) meta {
 	name := f.ServerFilename
 	if name == "" {
-		name = f.Path
+		name = path.Base(f.Path)
 	}
 	return meta{
 		ID: fmt.Sprint(f.FsID), ParentID: parent, Name: name, Path: f.Path,

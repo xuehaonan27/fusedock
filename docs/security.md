@@ -4,7 +4,7 @@ The broker gives the sandboxed FSKit extension access to an authenticated provid
 
 ## Assets and trust boundaries
 
-- The account metadata file contains provider IDs, usernames, endpoints, and the default account. It contains no secrets.
+- The current account metadata file contains provider IDs, usernames, endpoints, and the default account. New saved bindings also separate AccountID from CredentialRef; existing-account conversion is deferred and does not move credential items. It contains no secrets.
 - The password, OAuth credentials, and renewable provider session remain in Keychain, Secret Service, or Credential Manager. Only the CLI/broker process reads them.
 - The broker holds the provider session in memory and exposes metadata plus byte-range reads.
 - The FSKit extension holds only a temporary in-memory capability. It never receives a password, refresh token, account list, or credential-store API.
@@ -24,12 +24,12 @@ credential store
 
 - The listener binds specifically to `127.0.0.1` with an ephemeral port. It does not bind a wildcard or LAN interface.
 - The capability file is created atomically with mode `0600` inside a directory requiring owner-only permissions.
-- Broker capability setup fails closed on Windows until a protected ACL and DPAPI-backed transport are implemented; the current FSKit broker targets macOS/Linux.
+- Windows private directories receive a protected current-user DACL. Daemon control uses a local named pipe with the current-user SID; the client also verifies the server process SID. The standalone credential-file reader on Windows remains unsupported.
 - The disk capability is bootstrap-only and can be claimed exactly once. A successful claim issues a new random 256-bit data capability that exists only in broker and extension memory.
 - Data endpoints accept only the claimed session capability. Reusing the bootstrap capability for root, list, stat, or read returns `401`.
 - `close` revokes the in-memory capability; the CLI removes the bootstrap file immediately after a successful claim and again on broker exit.
 - Authorization comparison uses constant-time comparison. Tokens are never printed, put in URLs, or logged.
-- All broker operations are POST requests with JSON input. There is no mutation route; unknown routes, including write-like paths, return `404`.
+- Protocol v2 operations are POST requests with JSON input. Reads return binary payloads. Objects are resolved server-side; reads use opaque handles and explicit release. There is no mutation route; unknown routes, including write-like paths, return `404`.
 - The server rejects any non-empty `Origin` or `Referer`, enforces the exact loopback Host value, caps request headers/body, and caps a single read at 16 MiB.
 - The client requires an HTTP URL with a literal loopback IP and port. It rejects DNS names, HTTPS downgrade ambiguity, paths, queries, user info, and redirects.
 - The client transport ignores proxy environment variables, so HTTP proxy settings cannot route object requests away from loopback.
@@ -51,15 +51,6 @@ credential store
 | Oversized read or malformed request consumes memory | JSON/read/header limits and range validation. |
 | Token appears in process arguments or logs | Token is generated in memory and written only to the private capability file; CLI output omits it. |
 
-## WebDAV additions
-
-- WebDAV uses a separate process-scoped token from the one-use FSKit capability. Both are random 256-bit values and both files are owner-only.
-- The WebDAV token is bound to one broker's selected account and to an optional provider subtree. No account list or other-account session is exposed.
-- Basic authentication is accepted for native WebDAV clients; Bearer authentication is accepted for browser clients. All writes and LOCK/UNLOCK are rejected, and DAV class 1 advertises the read-only behavior.
-- An unknown `Origin` or a browser `Sec-Fetch-Site: cross-site` request is rejected. Wildcard CORS is not supported. A configured browser origin receives only `GET`, `HEAD`, `PROPFIND`, and `OPTIONS`; other responses use `Cross-Origin-Resource-Policy: same-origin`.
-- The broker binds the WebDAV handler and FSKit protocol to the same loopback listener and exact Host value. It cannot be switched to a LAN interface through a CLI flag.
-- Current ETags derive from provider object ID/version, not from a mutable path name, but the existing Version is only a freshness hint. The target contract exposes a strong ETag only for a strong ContentVersion; weak or synthetic metadata values must not be advertised as byte-identity proof. Range reads are validated by the provider before HTTP content serving.
-
 ## Residual risk
 
 The operating system does not provide a portable way to prove over loopback TCP that the caller is a specific sandboxed extension. A same-user process can read the private capability file before the extension claims it or race the one-use claim. If it wins, it can obtain read-only access to the selected account until the broker stops or the capability is revoked. It cannot obtain the password, refresh token, write access, account-management access, or access to a different account.
@@ -70,6 +61,17 @@ The one-use file also has a lifecycle gap: the system can terminate and relaunch
 
 For release hardening, the next broker transport should be a Unix domain socket or XPC service with peer code-signing checks, plus a launchd-managed broker lifecycle. The current loopback protocol remains useful because FSKit's extension sandbox and Go bridge can use it without weakening the Keychain ACL or embedding credentials.
 
-The persistent cache planned in [persistent-block-cache.md](persistent-block-cache.md) stores plaintext file payloads under an owner-only directory. Its threat model is comparable to an owner-only browser cache or the OS page cache: it does not protect data from a malicious process running as the same operating-system user. Per-account disablement will be available; encryption whose key is also available to the same user would not change that threat boundary.
+The persistent cache implemented in `internal/blockcache` stores plaintext file payloads under an owner-only directory. Its threat model is comparable to an owner-only browser cache or the OS page cache: it does not protect data from a malicious process running as the same operating-system user. Each daemon mount can disable persistent retention with `--persistent-cache=false`; encryption whose key is also available to the same user would not change that threat boundary.
 
 This review does not claim zero additional attack surface. It establishes that the broker does not cross the account or OS-user boundary and that its new capability is read-only and short-lived.
+
+## Daemon and persistent storage implementation
+
+- Control uses a private Unix socket with peer UID checks on Linux/macOS, or a current-user named pipe on Windows. The control endpoint is not a network listener. These checks authenticate the OS user; macOS code-signing identity checks remain unfinished.
+- Each mounted scope has a resolved target. Data requests accept server-observed object IDs and revisions. Removing or rebinding an account revokes its target and data endpoints when the account watcher observes the change (currently every two seconds).
+- New account bindings receive a random AccountID and separate CredentialRef. Refresh persistence matches immutable binding identity, including after alias rename. Old sessions cannot update a replacement account.
+- One daemon holds the disk-cache ownership lock. Cache entries use namespace-separated hashed paths, complete temporary writes, root-relative atomic publication, and header/key/length/payload validation before a cold hit is delivered.
+- Unix entries must be owned by the user, private, regular, and single-linked. Windows entries reject non-regular, multiply-linked, and reparse files; directory ACLs restrict the current user.
+- Cache data is plaintext and readable by the same OS user. The shared memory budget includes retained and in-flight block payloads. Native kernel caches, object tables, metadata in-flight allocations, and all process overhead are not yet covered by a complete global byte ledger.
+
+The new unit and integration tests use local fixture providers and fake credential stores. They do not perform a new real-account security audit or qualify Baidu digests for persistent reuse.

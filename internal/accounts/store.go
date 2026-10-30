@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/gofrs/flock"
+	"github.com/xuehaonan27/fusedock/internal/namespace"
 	"github.com/zalando/go-keyring"
 )
 
@@ -30,11 +31,15 @@ var (
 )
 
 type Account struct {
-	Name     string            `json:"name"`
-	Provider string            `json:"provider"`
-	Username string            `json:"username"`
-	Options  map[string]string `json:"options,omitempty"`
-	Created  time.Time         `json:"created"`
+	AccountID     namespace.AccountID `json:"account_id,omitempty"`
+	CredentialRef string              `json:"credential_ref,omitempty"`
+	Binding       string              `json:"binding,omitempty"`
+	BindingFields map[string]string   `json:"binding_fields,omitempty"`
+	Name          string              `json:"name"`
+	Provider      string              `json:"provider"`
+	Username      string              `json:"username"`
+	Options       map[string]string   `json:"options,omitempty"`
+	Created       time.Time           `json:"created"`
 }
 
 type Config struct {
@@ -216,8 +221,17 @@ func validateConfig(config Config) error {
 		return errors.New("unsupported account store version")
 	}
 	names := make(map[string]bool, len(config.Accounts))
+	identities := map[namespace.AccountID]bool{}
+	refs := map[string]bool{}
 	for _, account := range config.Accounts {
-		if !ValidName(account.Name) || names[account.Name] {
+		if account.AccountID != "" {
+			if !account.AccountID.Valid() || identities[account.AccountID] || account.CredentialRef == "" || refs[account.CredentialRef] || account.Binding != account.BindingFingerprint() {
+				return errors.New("invalid or duplicate account binding")
+			}
+			identities[account.AccountID] = true
+			refs[account.CredentialRef] = true
+		}
+		if !ValidName(account.Name) || names[strings.ToLower(account.Name)] {
 			return errors.New("account store contains an invalid or duplicate name")
 		}
 		if !ValidID(account.Provider) || strings.TrimSpace(account.Username) == "" {
@@ -228,9 +242,9 @@ func validateConfig(config Config) error {
 				return fmt.Errorf("account %q has invalid option %q", account.Name, key)
 			}
 		}
-		names[account.Name] = true
+		names[strings.ToLower(account.Name)] = true
 	}
-	if (config.Default == "" && len(config.Accounts) > 0) || (config.Default != "" && !names[config.Default]) {
+	if (config.Default == "" && len(config.Accounts) > 0) || (config.Default != "" && !names[strings.ToLower(config.Default)]) {
 		return errors.New("account store has an invalid default account")
 	}
 	return nil
@@ -276,7 +290,7 @@ func (s *Store) write(config Config) error {
 }
 
 func ValidName(name string) bool {
-	if name == "" || len(name) > 64 {
+	if name == "" || name == "." || name == ".." || strings.HasSuffix(name, ".") || len(name) > 64 {
 		return false
 	}
 	for _, r := range name {
@@ -340,7 +354,29 @@ func (s *Store) AddWithState(ctx context.Context, account Account, secretValues 
 		if exists && existing.Provider != account.Provider {
 			return errors.New("account name already belongs to another provider")
 		}
-		secret, err := s.readSecret(account.Name)
+		for _, other := range config.Accounts {
+			if other.Name != account.Name && strings.EqualFold(other.Name, account.Name) {
+				return ErrExists
+			}
+		}
+		account.Binding = account.BindingFingerprint()
+		if exists && existing.AccountID != "" && existing.Binding == account.Binding {
+			account.AccountID = existing.AccountID
+			account.CredentialRef = existing.CredentialRef
+		} else if exists && existing.AccountID == "" {
+			// Existing-account conversion remains a separate operation.
+			account.AccountID = ""
+			account.CredentialRef = ""
+			account.Binding = ""
+		} else {
+			account.AccountID, err = namespace.NewAccountID()
+			if err != nil {
+				return err
+			}
+			account.CredentialRef = string(account.AccountID)
+		}
+		key := account.credentialKey()
+		secret, err := s.readSecret(key)
 		if err != nil && !errors.Is(err, keyring.ErrNotFound) {
 			return err
 		}
@@ -361,7 +397,7 @@ func (s *Store) AddWithState(ctx context.Context, account Account, secretValues 
 			}
 			secret.State = append(json.RawMessage(nil), state...)
 		}
-		if err := s.writeSecret(account.Name, secret); err != nil {
+		if err := s.writeSecret(key, secret); err != nil {
 			return err
 		}
 		account.Options = cloneOptions(account.Options)
@@ -388,11 +424,14 @@ func (s *Store) AddWithState(ctx context.Context, account Account, secretValues 
 		}
 		if err := s.write(config); err != nil {
 			if previousExists {
-				_ = s.writeSecret(account.Name, previousSecret)
+				_ = s.writeSecret(key, previousSecret)
 			} else {
-				_ = s.Secrets.Delete(secretService, account.Name)
+				_ = s.Secrets.Delete(secretService, key)
 			}
 			return err
+		}
+		if exists && existing.credentialKey() != key {
+			return s.Secrets.Delete(secretService, existing.credentialKey())
 		}
 		return nil
 	})
@@ -419,10 +458,12 @@ func (s *Store) Remove(ctx context.Context, name string) error {
 			return err
 		}
 		found := false
+		key := ""
 		accounts := config.Accounts[:0]
 		for _, account := range config.Accounts {
 			if account.Name == name {
 				found = true
+				key = account.credentialKey()
 				continue
 			}
 			accounts = append(accounts, account)
@@ -440,7 +481,7 @@ func (s *Store) Remove(ctx context.Context, name string) error {
 		if err := s.write(config); err != nil {
 			return err
 		}
-		return s.Secrets.Delete(secretService, name)
+		return s.Secrets.Delete(secretService, key)
 	})
 }
 
@@ -459,7 +500,7 @@ func (s *Store) Credentials(ctx context.Context, name string) (Account, map[stri
 		if !ok {
 			return ErrNotFound
 		}
-		secret, err := s.readSecret(name)
+		secret, err := s.readSecret(account.credentialKey())
 		if err != nil {
 			return fmt.Errorf("read account secret: %w", err)
 		}
@@ -483,16 +524,29 @@ func (s *Store) Credentials(ctx context.Context, name string) (Account, map[stri
 // bound into the state payload so concurrent replacement cannot target a new
 // account accidentally.
 func (s *Store) SaveState(ctx context.Context, name, provider, username string, state []byte) error {
+	return s.saveState(ctx, name, provider, username, "", "", state)
+}
+func (s *Store) saveState(ctx context.Context, name, provider, username string, id namespace.AccountID, binding string, state []byte) error {
 	return s.withLock(ctx, true, func() error {
 		config, err := s.read()
 		if err != nil {
 			return err
 		}
 		account, ok := config.Find(name)
+		if id != "" {
+			ok = false
+			for _, a := range config.Accounts {
+				if a.AccountID == id && a.Binding == binding {
+					account = a
+					ok = true
+					break
+				}
+			}
+		}
 		if !ok || account.Provider != provider || account.Username != username {
 			return errors.New("account changed while provider state was being saved")
 		}
-		secret, err := s.readSecret(name)
+		secret, err := s.readSecret(account.credentialKey())
 		if err != nil {
 			return err
 		}
@@ -500,7 +554,7 @@ func (s *Store) SaveState(ctx context.Context, name, provider, username string, 
 			return nil
 		}
 		secret.State = append(json.RawMessage(nil), state...)
-		return s.writeSecret(name, secret)
+		return s.writeSecret(account.credentialKey(), secret)
 	})
 }
 

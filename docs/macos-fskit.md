@@ -24,8 +24,8 @@ The source path passed to `mount` is a security-scoped capability file handled b
 
 ## Requirements
 
-- macOS 26.0 or newer for the `FSPathURLResource` interface used by this build. FSKit itself begins at macOS 15.4.
-- Xcode with the macOS SDK and a valid Apple Development signing identity.
+- macOS 27 or newer. The cache lifecycle uses `FSVolume.DataCacheHandler` and `setCacheState`, introduced in macOS 27.
+- Xcode 27 with the macOS 27 SDK and a valid Apple Development signing identity.
 - A development team with the FSKit file-system-extension entitlement. Xcode obtains the profile automatically for normal Apple Developer accounts.
 
 No macFUSE installation is needed.
@@ -61,7 +61,7 @@ bin/fusedock broker start --account pku \
 
 The generated file contains a loopback endpoint and a one-use capability, not a password. The extension claims it once and keeps only an in-memory session capability. The file is removed immediately after the claim. Mount from another terminal:
 
-This is the current implementation, not the final lifecycle model. If macOS restarts the extension, its in-memory capability is gone and the one-use mount resource cannot be claimed again. The planned launchd-managed daemon and peer-authenticated UDS/XPC channel will let the extension reconnect without the CLI being present.
+This is the current implementation, not the final lifecycle model. If macOS restarts the extension, its in-memory capability is gone and the one-use mount resource cannot be claimed again. The daemon now supplies service registration and same-user UDS control. The signed peer channel needed for automatic extension reconnection remains unfinished.
 
 ```sh
 mkdir -p "$HOME/FuseDockPKU"
@@ -84,7 +84,25 @@ The NFS bridge remains a future fallback for systems where FSKit or extension de
 
 - The FSKit extension is read-only.
 - CAPTCHA/OTP prompts are not yet connected to the host application.
-- The broker is a foreground development process; launchd supervision and peer-authenticated XPC/Unix-socket transport are pending.
+- The daemon has launchd service registration and same-user UDS control. Signed peer authentication and automatic extension reconnection are pending.
+- Xcode 27 compilation and native revision/cache acceptance are pending on a suitable host; the current development machine runs macOS 26.5.1.
 - The legacy direct credential-file path remains as a fallback, but it is read-only and does not persist a refresh session.
 - The extension requires local signing and the one-time Filesystem Extension toggle.
 - The current implementation is a development build; distribution needs an app bundle, notarization, and a release workflow.
+
+## Daemon mounting
+
+On macOS 27 with the matching extension installed:
+
+```sh
+bin/fusedock daemon start
+mkdir -p "$HOME/FuseDockPKU"
+bin/fusedock daemon mount --id pku --account pku --mountpoint "$HOME/FuseDockPKU"
+bin/fusedock daemon status
+bin/fusedock daemon unmount --id pku
+bin/fusedock daemon stop
+```
+
+`daemon install` registers the user LaunchAgent for login and failure recovery. `daemon uninstall` removes the registration. These commands are explicit service operations. A normal `daemon start` does not install a login agent.
+
+See Apple's [DataCacheHandler documentation](https://developer.apple.com/documentation/fskit/fsvolume/datacachehandler) and [setCacheState documentation](https://developer.apple.com/documentation/fskit/fsvolume/setcachestate(for:cachemode:coherencytype:action:)). Cache state changes run outside module locks because the kernel can reenter the extension during the call.

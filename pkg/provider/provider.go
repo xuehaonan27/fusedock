@@ -29,17 +29,22 @@ const (
 )
 
 // Object is a snapshot of one remote object. ID must be stable for the lifetime
-// of a Session and unique within it. Version changes whenever readable content
-// changes and is suitable for cache invalidation and conflict detection.
+// of a Session and unique within it. ContentVersion identifies immutable bytes
+// within that object when the provider advertises a qualifying read path.
+// MetadataVersion and Version track metadata freshness only.
 type Object struct {
-	ID       string    `json:"id"`
-	ParentID string    `json:"parent_id"`
-	Name     string    `json:"name"`
-	Kind     Kind      `json:"kind"`
-	Size     int64     `json:"size"`
-	Version  string    `json:"version"`
-	Modified time.Time `json:"modified"`
-	Created  time.Time `json:"created"`
+	ID              string    `json:"id"`
+	ParentID        string    `json:"parent_id"`
+	Name            string    `json:"name"`
+	Kind            Kind      `json:"kind"`
+	Size            int64     `json:"size"`
+	Version         string    `json:"version"` // metadata freshness; never persistent-cache proof
+	ContentVersion  string    `json:"content_version,omitempty"`
+	MetadataVersion string    `json:"metadata_version,omitempty"`
+	Digest          Digest    `json:"digest,omitempty"`
+	NoCache         bool      `json:"no_cache,omitempty"`
+	Modified        time.Time `json:"modified"`
+	Created         time.Time `json:"created"`
 }
 
 func (o Object) IsDir() bool { return o.Kind == KindDirectory }
@@ -59,6 +64,7 @@ const (
 // OptionSpec lets the CLI describe provider configuration without hard-coded
 // provider flags.
 type OptionSpec struct {
+	Identity    bool // participates in the account binding
 	Key         string
 	Description string
 	Default     string
@@ -67,6 +73,7 @@ type OptionSpec struct {
 
 // CredentialSpec describes a credential key understood by OpenRequest.
 type CredentialSpec struct {
+	Identity    bool // non-secret remote/application identity only
 	Key         string
 	Description string
 	Secret      bool
@@ -74,13 +81,14 @@ type CredentialSpec struct {
 }
 
 type Descriptor struct {
-	ContractVersion uint32
-	ID              string
-	Name            string
-	Description     string
-	Capabilities    Capabilities
-	Options         []OptionSpec
-	Credentials     []CredentialSpec
+	ContractVersion  uint32
+	ID               string
+	Name             string
+	Description      string
+	Capabilities     Capabilities
+	ReadCapabilities ReadCapabilities // upper bound; sessions and objects may narrow it
+	Options          []OptionSpec
+	Credentials      []CredentialSpec
 }
 
 // ContractVersion identifies the provider interface expected by this release.

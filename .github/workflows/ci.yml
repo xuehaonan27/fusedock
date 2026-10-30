@@ -1,47 +1,115 @@
 name: ci
-
 on:
   push:
   pull_request:
-
+  workflow_dispatch:
+    inputs:
+      native_fskit:
+        description: Run on the configured FSKit acceptance host
+        type: boolean
+        default: false
 permissions:
   contents: read
-
 jobs:
-  test:
+  core:
     strategy:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest, windows-latest]
     runs-on: ${{ matrix.os }}
+    env:
+      CGO_ENABLED: '0'
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with:
-          go-version: "1.24.x"
-          cache: true
-      - name: Format
-        if: runner.os != 'Windows'
-        run: test -z "$(gofmt -l cmd internal pkg macos/bridge)"
+          go-version: '1.25.x'
+      - name: Core and service contracts
+        run: go test ./pkg/... ./internal/accounts ./internal/credentials ./internal/namespace ./internal/blockcache ./internal/vfs ./internal/broker ./internal/providers/... ./internal/localtransport ./internal/daemon ./internal/cli
       - name: Vet
         run: go vet ./...
-      - name: Test with race detector
-        if: runner.os != 'Windows'
-        run: go test -race ./...
-      - name: Test Windows
-        if: runner.os == 'Windows'
-        run: go test ./...
-
+  race:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.25.x'
+      - run: go test -race ./...
+      - run: test -z "$(gofmt -l cmd internal pkg macos/bridge)"
+  go-fuse-library:
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.25.x'
+      - run: go test -race ./internal/driver/gofuse
+  linux-native:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.25.x'
+      - run: sudo apt-get update && sudo apt-get install -y fuse3
+      - name: Native FUSE contracts
+        env:
+          FUSEDOCK_FUSE_TEST: '1'
+        run: go test -count=1 -v ./internal/driver/linux
+  windows-native:
+    runs-on: windows-latest
+    env:
+      CGO_ENABLED: '0'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.25.x'
+      - name: Install WinFsp
+        shell: powershell
+        run: choco install winfsp -y --no-progress
+      - name: Native WinFsp contracts
+        env:
+          FUSEDOCK_WINFSP_TEST: '1'
+        run: go test -count=1 -v ./internal/driver/winfsp
+  macos-build:
+    runs-on: xcode-27
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.25.x'
+      - run: make macos-bridge
+      - run: xcodebuild -project macos/FSKit/FuseDockFSKit.xcodeproj -scheme FuseDock -configuration Debug -derivedDataPath /tmp/fusedock-ci CODE_SIGNING_ALLOWED=NO build
+  macos-native:
+    if: github.event_name == 'workflow_dispatch' && inputs.native_fskit
+    runs-on: [self-hosted, macOS, fusedock-fskit]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.25.x'
+      - name: Install matching extension
+        env:
+          DEVELOPMENT_TEAM: ${{ vars.FUSEDOCK_DEVELOPMENT_TEAM }}
+        run: make macos-install
+      - name: Native FSKit contracts
+        env:
+          FUSEDOCK_FSKIT_TEST: '1'
+        run: go test -count=1 -v ./internal/driver/fskit
   cross-build:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with:
-          go-version: "1.24.x"
-          cache: true
-      - name: Build supported targets
+          go-version: '1.25.x'
+      - name: Compile each adapter and test suite
         run: |
-          GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -o /tmp/fusedock-linux ./cmd/fusedock
-          GOOS=darwin GOARCH=arm64 CGO_ENABLED=0 go build -o /tmp/fusedock-darwin ./cmd/fusedock
-          GOOS=windows GOARCH=amd64 CGO_ENABLED=0 go build -o /tmp/fusedock.exe ./cmd/fusedock
+          GOOS=linux CGO_ENABLED=0 go test -exec /usr/bin/true ./...
+          GOOS=darwin GOARCH=arm64 CGO_ENABLED=0 go test -exec /usr/bin/true ./...
+          GOOS=windows CGO_ENABLED=0 go test -exec /usr/bin/true ./...

@@ -23,30 +23,37 @@ import (
 	"time"
 	"unsafe"
 
-	"github.com/xuehaonan/fusedock/internal/credentials"
-	"github.com/xuehaonan/fusedock/internal/providers"
-	"github.com/xuehaonan/fusedock/internal/vfs"
-	"github.com/xuehaonan/fusedock/pkg/provider"
+	"github.com/xuehaonan27/fusedock/internal/credentials"
+	"github.com/xuehaonan27/fusedock/internal/namespace"
+	"github.com/xuehaonan27/fusedock/internal/providers"
+	"github.com/xuehaonan27/fusedock/internal/vfs"
+	"github.com/xuehaonan27/fusedock/pkg/provider"
 )
 
 type wireObject struct {
-	ID       string `json:"id"`
-	ParentID string `json:"parent_id"`
-	Name     string `json:"name"`
-	Kind     string `json:"kind"`
-	Size     int64  `json:"size"`
-	Version  string `json:"version"`
-	Modified int64  `json:"modified"`
+	ContentVersion string `json:"content_version"`
+	NodeID         uint64 `json:"node_id"`
+	ParentNodeID   uint64 `json:"parent_node_id"`
+	ID             string `json:"id"`
+	ParentID       string `json:"parent_id"`
+	Name           string `json:"name"`
+	Kind           string `json:"kind"`
+	Size           int64  `json:"size"`
+	Version        string `json:"version"`
+	Modified       int64  `json:"modified"`
 }
 
 type bridgeState struct {
-	session provider.Session
-	ctx     context.Context
-	cancel  context.CancelFunc
-	closed  bool
-	mu      sync.Mutex
-	readers map[string]provider.Reader
-	objects map[string]provider.Object
+	nodes      namespace.Nodes
+	volumeID   string
+	session    provider.Session
+	ctx        context.Context
+	cancel     context.CancelFunc
+	closed     bool
+	mu         sync.Mutex
+	readers    map[uint64]provider.Reader
+	nextReader uint64
+	objects    map[string]provider.Object
 }
 
 var handles = struct {
@@ -94,7 +101,7 @@ func fusedock_open(configPath *C.char, errorOut **C.char) *C.FuseDockHandle {
 	}
 	defer clearValues(secrets)
 	if accountName := strings.TrimSpace(string(values["account"])); accountName != "" {
-		setError(errorOut, fmt.Errorf("account-backed FSKit mounts require the FuseDock account broker (not implemented); use a credential file for account %q", accountName))
+		setError(errorOut, fmt.Errorf("mount saved account %q through 'fusedock daemon mount' or a broker capability file", accountName))
 		return nil
 	}
 	ctx, cancel := context.WithCancel(context.Background())
@@ -104,9 +111,12 @@ func fusedock_open(configPath *C.char, errorOut **C.char) *C.FuseDockHandle {
 		setError(errorOut, err)
 		return nil
 	}
+	if providerID != "broker" {
+		session = vfs.New(session, 2*time.Second)
+	}
 	state := &bridgeState{
-		session: vfs.New(session, 2*time.Second), ctx: ctx, cancel: cancel,
-		readers: make(map[string]provider.Reader), objects: make(map[string]provider.Object),
+		session: session, ctx: ctx, cancel: cancel, volumeID: string(values["volume_id"]),
+		readers: make(map[uint64]provider.Reader), objects: make(map[string]provider.Object),
 	}
 	handles.Lock()
 	token := (*C.FuseDockHandle)(C.malloc(1))
@@ -126,10 +136,7 @@ func fusedock_close(token *C.FuseDockHandle) {
 	handles.Unlock()
 	state.mu.Lock()
 	state.closed = true
-	for key, reader := range state.readers {
-		_ = reader.Close()
-		delete(state.readers, key)
-	}
+	clear(state.readers)
 	state.mu.Unlock()
 	state.cancel()
 	_ = state.session.Close()
@@ -149,7 +156,7 @@ func fusedock_root(token *C.FuseDockHandle, errorOut **C.char) *C.char {
 		return nil
 	}
 	state.remember(object)
-	return marshalObject(object, errorOut)
+	return marshal(state.encodeObject(object), errorOut)
 }
 
 //export fusedock_lookup
@@ -169,7 +176,7 @@ func fusedock_lookup(token *C.FuseDockHandle, parentID, name *C.char, errorOut *
 	for _, object := range objects {
 		if object.Name == wanted {
 			state.remember(object)
-			return marshalObject(object, errorOut)
+			return marshal(state.encodeObject(object), errorOut)
 		}
 	}
 	setError(errorOut, fmt.Errorf("%w: %s", provider.ErrNotFound, wanted))
@@ -191,7 +198,7 @@ func fusedock_list(token *C.FuseDockHandle, parentID *C.char, errorOut **C.char)
 	wire := make([]wireObject, 0, len(objects))
 	for _, object := range objects {
 		state.remember(object)
-		wire = append(wire, encodeObject(object))
+		wire = append(wire, state.encodeObject(object))
 	}
 	return marshal(wire, errorOut)
 }
@@ -214,12 +221,12 @@ func fusedock_stat(token *C.FuseDockHandle, objectID *C.char, errorOut **C.char)
 		return nil
 	}
 	state.remember(object)
-	return marshalObject(object, errorOut)
+	return marshal(state.encodeObject(object), errorOut)
 }
 
 //export fusedock_read
-func fusedock_read(token *C.FuseDockHandle, objectID *C.char, offset C.int64_t, dest unsafe.Pointer, length C.int64_t, errorOut **C.char) C.int64_t {
-	if offset < 0 || length < 0 || length > 512<<20 {
+func fusedock_read(token *C.FuseDockHandle, readID C.uint64_t, offset C.int64_t, dest unsafe.Pointer, length C.int64_t, errorOut **C.char) C.int64_t {
+	if offset < 0 || length < 0 || length > 16<<20 {
 		setError(errorOut, errors.New("invalid read range"))
 		return -1
 	}
@@ -231,10 +238,11 @@ func fusedock_read(token *C.FuseDockHandle, objectID *C.char, offset C.int64_t, 
 		setError(errorOut, errors.New("FuseDock session is closed"))
 		return -1
 	}
-	id := C.GoString(objectID)
-	reader, err := state.readerFor(id)
-	if err != nil {
-		setError(errorOut, err)
+	state.mu.Lock()
+	reader := state.readers[uint64(readID)]
+	state.mu.Unlock()
+	if reader == nil {
+		setError(errorOut, errors.New("read handle is closed"))
 		return -1
 	}
 	buffer := unsafe.Slice((*byte)(dest), int(length))
@@ -253,28 +261,73 @@ func fusedock_free(pointer unsafe.Pointer) {
 	}
 }
 
-func (s *bridgeState) readerFor(id string) (provider.Reader, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.closed {
-		return nil, errors.New("FuseDock session is closed")
+//export fusedock_open_read
+func fusedock_open_read(token *C.FuseDockHandle, objectID *C.char, version *C.char, size C.int64_t, errorOut **C.char) *C.char {
+	s := lookup(token)
+	if s == nil {
+		setError(errorOut, errors.New("session closed"))
+		return nil
 	}
-	if reader := s.readers[id]; reader != nil {
-		return reader, nil
-	}
-	object, ok := s.objects[id]
+	object, ok := s.known(C.GoString(objectID))
 	if !ok {
-		return nil, fmt.Errorf("%w: object metadata is unavailable", provider.ErrNotFound)
+		setError(errorOut, provider.ErrNotFound)
+		return nil
 	}
-	if object.IsDir() {
-		return nil, provider.ErrNotDirectory
+	var reader provider.Reader
+	var err error
+	selected := C.GoString(version)
+	caps, e := provider.CapabilitiesFor(s.ctx, s.session)
+	if e != nil {
+		setError(errorOut, e)
+		return nil
 	}
-	reader, err := s.session.OpenRead(s.ctx, object)
+	if selected != "" && caps.ExactRange {
+		object.ContentVersion = selected
+		object.Size = int64(size)
+		reader, err = s.session.(provider.RevisionReader).OpenReadRevision(s.ctx, object.Revision())
+	} else {
+		object, err = s.session.Stat(s.ctx, object)
+		if err == nil {
+			reader, err = s.session.OpenRead(s.ctx, object)
+		}
+	}
 	if err != nil {
-		return nil, err
+		setError(errorOut, err)
+		return nil
 	}
+	if snapshot, ok := reader.(provider.SnapshotReader); ok && !(selected != "" && caps.ExactRange) {
+		object = snapshot.Snapshot()
+	}
+	s.mu.Lock()
+	if s.closed {
+		s.mu.Unlock()
+		reader.Close()
+		setError(errorOut, errors.New("session closed"))
+		return nil
+	}
+	s.nextReader++
+	id := s.nextReader
 	s.readers[id] = reader
-	return reader, nil
+	s.mu.Unlock()
+	return marshal(struct {
+		Handle   uint64     `json:"handle"`
+		Snapshot wireObject `json:"snapshot"`
+	}{id, s.encodeObject(object)}, errorOut)
+}
+
+//export fusedock_close_read
+func fusedock_close_read(token *C.FuseDockHandle, readID C.uint64_t) {
+	s := lookup(token)
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	reader := s.readers[uint64(readID)]
+	delete(s.readers, uint64(readID))
+	s.mu.Unlock()
+	if reader != nil {
+		reader.Close()
+	}
 }
 
 func (s *bridgeState) remember(object provider.Object) {
@@ -301,7 +354,7 @@ func lookup(token *C.FuseDockHandle) *bridgeState {
 
 func normalizeID(id string) string { return strings.TrimSpace(id) }
 
-func encodeObject(object provider.Object) wireObject {
+func (s *bridgeState) encodeObject(object provider.Object) wireObject {
 	kind := "file"
 	if object.IsDir() {
 		kind = "directory"
@@ -311,13 +364,25 @@ func encodeObject(object provider.Object) wireObject {
 		modified = object.Modified.UnixNano()
 	}
 	return wireObject{
-		ID: object.ID, ParentID: object.ParentID, Name: object.Name, Kind: kind,
-		Size: object.Size, Version: object.Version, Modified: modified,
+		ID: object.ID, ParentID: object.ParentID, Name: object.Name, Kind: kind, NodeID: s.nodes.ID(namespace.NodeKey{ObjectID: object.ID}), ParentNodeID: s.parentNodeID(object.ParentID),
+		Size: object.Size, Version: object.Version, ContentVersion: object.ContentVersion, Modified: modified,
 	}
 }
 
-func marshalObject(object provider.Object, errorOut **C.char) *C.char {
-	return marshal(encodeObject(object), errorOut)
+func (s *bridgeState) parentNodeID(id string) uint64 {
+	if id == "" {
+		return 0
+	}
+	return s.nodes.ID(namespace.NodeKey{ObjectID: id})
+}
+
+//export fusedock_volume_id
+func fusedock_volume_id(token *C.FuseDockHandle) *C.char {
+	s := lookup(token)
+	if s == nil {
+		return nil
+	}
+	return C.CString(s.volumeID)
 }
 
 func marshal(value any, errorOut **C.char) *C.char {

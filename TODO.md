@@ -1,244 +1,170 @@
-# FuseDock TODO
+# FuseDock engineering plan
 
-This is the prioritized engineering backlog. It records the next product stages; only the 0.1 baseline described in the README is currently implemented.
+Updated: 2026-10-30. This is the authoritative implementation plan. The design review and experiments remain evidence; the decisions below supersede their earlier implementation ordering.
 
-The 2026-10-26 external review and our disposition are in [FuseDock 设计审阅意见.md](FuseDock%20设计审阅意见.md) and [docs/design-review-response.md](docs/design-review-response.md). The review corrected the content-version scope, moved revision binding to every remote request, and made the FSKit lifecycle/control plane a prerequisite for persistent identity.
+FuseDock provides a filesystem abstraction. Its public behavior covers paths, object identity, open/read/close, attributes, random access, errors, and native caching. A read snapshot is a valid filesystem consistency model. The core keeps version-bound snapshots; each platform adapter must implement their observable behavior across the entire read path.
 
-The first prerequisite-test round and its evidence are recorded in [docs/prerequisite-test-results.md](docs/prerequisite-test-results.md). A gate is removed from this plan only after it passes; a failed or inconclusive experiment remains an explicit blocker.
+The work below is grouped by responsibility, not implementation stages. Deliver the filesystem foundation as a complete implementation: account identity, namespace, provider capabilities, daemon, platform integration, resource management, and persistent caching are designed and accepted together. The daemon includes its full lifecycle and control/data APIs. Tests are separated by dependency and platform, not by reduced product scope.
 
-The immediate dependency order is:
+## Implementation evidence
 
-1. Correct the version contract and remove unsafe platform claims immediately.
-2. Make account binding and credentials survive rename and restart.
-3. Introduce a supervised daemon with a reconnectable authenticated control/data plane.
-4. Prove per-request revision binding and provider capabilities.
-5. Fix NodeKey, FUSE/FSKit identity, volume identity, and mount lifecycle.
-6. Establish metadata, memory, and provider-call baselines.
-7. Add the persistent block cache and then aggregate multi-account views.
-8. Broaden providers and native platform coverage.
-9. Add version-checked writes and recovery.
-10. Add distribution, security hardening, and the external provider SDK.
+The current code and test results are recorded in [foundation status](docs/foundation-status.md). Checked items below identify implemented and locally verified responsibilities; the complete foundation is still open while native acceptance and the listed implementation work remain outstanding.
 
-Do not enable a shared disk cache before the namespace contract is implemented and tested. Do not start the write path before the persistent cache and identity model are stable.
+The user authorized GitHub Actions runners for Linux/Windows and macOS 27 as the minimum for the FSKit cache lifecycle. CI entries are configured. The user authorized creating the public repository `xuehaonan27/fusedock` and running these Actions jobs. The current macOS 26.5.1/Xcode 26.6 host cannot compile or execute the FSKit 27 APIs.
 
-## Verification gates and current results
+## Filesystem behavior and read lifetime
 
-| Gate | Current result | Plan treatment |
+- [x] Define the lifetime of a read snapshot from open through close/reclaim, including the operation that selects its revision and size.
+- [ ] Bind every read on an exact-version handle to that snapshot. A missing revision returns `ErrConflict`; a handle that has returned bytes never switches versions.
+- [ ] Map the snapshot model to Linux file handles, FSKit item/open lifetimes, and WinFsp handles, including concurrent opens of different revisions of the same object.
+- [ ] Keep snapshot size, EOF, read results, and handle attributes consistent. Path metadata may describe the newly resolved version while an existing handle still reads its selected version.
+- [ ] Replace FSKit's indefinitely retained object-ID reader map with explicit open/close/reclaim ownership. Closing and sequentially browsing files must release readers and buffers.
+- [ ] Integrate native data-cache invalidation and refresh with version selection. Use normal platform caching; direct I/O is not an implementation prerequisite or default workaround.
+- [ ] Revalidate on reopen according to the provider's measured metadata policy. Define explicit refresh and invalidation behavior.
+- [ ] Cover rename, replacement at the same path, same-size content changes, concurrent revisions, cross-block reads, EOF, close/reopen, and resource reclamation in shared surface contracts.
+- [ ] Keep ordinary current-version access explicit for providers without snapshot guarantees. That capability does not become proof for a version-keyed persistent entry.
+
+Acceptance: application-visible bytes and attributes follow the selected read contract through provider, daemon, adapter, and native caches; a reopen observes refreshed content; closed reads release their resources. Snapshot semantics are retained as a deliberate filesystem design, rather than inferred from what generic `open()` guarantees.
+
+## Account identity and namespace
+
+- [x] Give each new saved binding an opaque random `AccountID`, independent of its alias, credentials, and mount path.
+- [x] Store a stable `CredentialRef` separately from the alias. New accounts use an AccountID-based reference. Renaming an account changes presentation only.
+- [x] Declare provider binding fields explicitly: provider, normalized endpoint, remote principal, and identity-affecting options. Store their versioned fingerprint beside AccountID.
+- [x] Preserve identity for credential rotation within the same binding; allocate a new AccountID for a different binding or a recreated account.
+- [x] Resolve `NodeKey = account + provider + object` and `ObjectRevision = NodeKey + ContentVersion + size` from trusted session metadata.
+- [ ] Validate aliases and remote names under the surface's case/Unicode rules; report collisions without merging objects.
+- [x] Resolve a configured scope path at mount time. Keep the resolved root identity for that mount; resolve the configured path again on remount. File rename preserves object identity; replacement creates a different resolved object.
+- [x] Derive deterministic volume identity from AccountID and configured scope; keep object/cache identity separate from volume and mount identity.
+- [ ] Bind data authorization to the resolved mount target. Account removal or rebinding revokes its capabilities and existing reads.
+- [ ] Exercise identical remote IDs in different accounts, path replacement, alias rename, account recreation, and concurrent mounts.
+
+Acceptance: aliases and paths can change without confusing objects or credentials; two accounts never share cache/node identity by accident; the mounted root and each requested object belong to the authorized target.
+
+Existing-account conversion is the lowest-priority compatibility feature at the end of this plan. It is not part of core identity acceptance.
+
+## Provider content proof
+
+- [x] Implement separate `ContentVersion` and optional `MetadataVersion` fields in the provider contract and broker wire format.
+- [x] Use the object-scoped invariant: for a given NodeKey, the same non-empty ContentVersion denotes the same size and bytes. Different objects may share a version token.
+- [x] Add optional revision and read-capability interfaces. Factory capabilities are an upper bound; sessions and individual objects select the supported paths.
+- [x] Define separate eligibility for exact range fills and whole-object declared-digest fills. Whole-object verification does not require remote range support.
+- [ ] Bind each request of an exact range reader to its snapshot, including retries, redirects, signed-URL renewal, and metadata operations that select the download revision.
+- [x] For conditional ranges, use strong `If-Match` and verify `206`, `Content-Range`, total size, and response validator. A violated condition is `ErrConflict`.
+- [x] Keep whole-object digest verification optional: provider metadata supplies the digest, the digest is part of ContentVersion, and the comparison uses the original open snapshot. Download and verify the complete object before delivering bytes through this verified path or publishing its cache entry. Mismatch is `ErrConflict`.
+- [ ] Test digest modification, duplicate-content, and concurrent-change semantics before enabling that provider/object path. Locally computing a digest alone supplies no remote version evidence.
+- [x] Allow slices of a verified whole-file entry to serve random reads. That entry gives no eligibility to independently fetched unverified remote ranges.
+- [ ] Use provider-specific fixtures for PKU rev renewal/rollback/online edits and Baidu canonical-digest objects. Preserve the observed distinction between canonical and non-hex Baidu fields.
+- [ ] Document provider-native documents, shortcuts, exports, and unknown-size objects as explicit kinds/capabilities.
+- [ ] Assign network retries and `Retry-After` to providers; define a single error mapping for filesystem surfaces. No handle switches revision after returning bytes.
+
+Acceptance: exact range and whole-object digest proofs have separate positive and negative tests; a failed proof publishes no persistent entry; the full read snapshot remains coherent. Whole-file hashing is not a mandatory cost of opening an ordinary file.
+
+## Complete daemon and service lifecycle
+
+- [x] Deliver one daemon owning sessions, namespace state, VFS, persistent cache, and data endpoints.
+- [ ] Implement the complete authenticated local control API: account/session state, mount lifecycle, cache operations, diagnostics, reauthentication, shutdown, and service status.
+- [x] Implement a versioned binary data plane with target-scoped, revocable access. Resolve authoritative objects server-side from NodeKey/revision requests.
+- [ ] Implement reconnectable peer authentication and endpoint discovery through the platform transport: signed XPC/UDS integration on macOS and OS-identity-aware local transports on Linux/Windows.
+- [ ] Integrate service startup, login/restart recovery, configured mount restoration, orderly shutdown, and explicit force-stop with each platform host.
+- [ ] Restore authenticated operation after reauthentication while preserving mount identity and the contract of existing read snapshots.
+- [ ] Handle daemon restart, extension/driver restart, transport loss, and account reauthentication as distinct lifecycle events. Report whether existing reads resume or fail with the defined error; fresh reads use the restored session.
+- [ ] Carry request IDs through surface, daemon, VFS, and provider; expose bounded diagnostics without secrets, signed URLs, or file contents.
+
+Acceptance: the complete service runs independently of the initiating CLI; configured mounts and session operations recover as specified; old reads retain their revision or return the defined error; control and data authorization remain separate. Connection establishment alone is not mount or handle recovery.
+
+## Platform isolation and native tests
+
+Target dependency layout:
+
+```text
+provider / namespace / VFS / cache / daemon contracts
+                          |
+                common platform interface
+                          |
+       +------------------+-------------------+
+       |                  |                   |
+platform_linux.go  platform_darwin.go  platform_windows.go
+       |                  |                   |
+ Linux adapter       FSKit host/bridge     WinFsp adapter
+       |                  |                   |
+    go-fuse          Swift extension         WinFsp
+```
+
+- [x] Use Go build constraints and platform filename suffixes to route the common interface at compile time. Keep platform SDK types and driver imports inside their adapter packages.
+- [x] Separate reusable go-fuse translation/library logic from Linux mount, `/dev/fuse`, and `fusermount` integration.
+- [x] Give core/provider contracts, go-fuse library behavior, Linux FUSE, macOS FSKit, and Windows WinFsp independent test targets and CI jobs.
+- [x] Reuse filesystem behavior cases across native adapters through a shared test interface; keep environment setup and native assertions in platform suites.
+- [ ] Replace hash-derived FUSE identities with a collision-safe NodeKey map. Verify StableAttr, protocol node ID, `st_ino`, readdir `d_ino`, and FORGET lifecycle separately.
+- [x] Reproduce go-fuse's equal-StableAttr deduplication through `fs.NewNodeFS`/raw Lookup on macOS: distinct objects produced node IDs 2 and 2, inode 424242. This library behavior needs no mounted filesystem.
+- [x] Move the library regression into its independent test target; verify the NodeKey allocation prevents distinct objects receiving equal StableAttr.
+- [x] Keep FSKit `supportsPersistentObjectIDs = false` until there is a durable reverse-resolvable mapping.
+- [ ] Implement native-cache/snapshot coherence and open/close/reclaim behavior in each adapter. Restore persistent FSKit IDs only with a durable mapping and lookup tests.
+- [ ] Run actual Linux, macOS, and Windows mount/read/reopen/rename-observation/unmount acceptance on their respective hosts.
+
+Acceptance: the core has no native driver dependency; platform builds select exactly their adapter; library tests do not require a native mount; each native test result identifies its OS and driver. Cross-compilation is a separate build check.
+
+## Global resources, 2Q cache policy, and measured I/O
+
+- [ ] Account separately for retained data, in-flight fill buffers, IPC buffers, metadata lists, node/reader tables, and temporary disk files.
+- [ ] Enforce byte budgets and global request/fill concurrency. Admission happens before allocation; cancellation releases reservations and unused work.
+- [ ] Implement byte-budgeted 2Q: first-use FIFO, protected reusable entries, and bounded ghost history. Account for headers, payloads, and metadata overhead.
+- [x] Group correlated reads from one sequential access when recording reuse; thousands of small reads within one block must not promote a scan into a long-term hot set.
+- [ ] Separate provider fetch granularity from persistent block size. Grow bounded read-ahead for sequential access and reduce it after seeks; cancel unused speculative work.
+- [ ] Add call, network-byte, latency, queue-time, cancellation, and resource counters at the common provider/VFS boundary.
+- [ ] Make metadata TTL configurable per provider/session and expose explicit invalidation. Determine defaults from measured freshness and request costs.
+- [ ] Measure Finder open/scroll activity over 60 seconds, QuickLook and media seeks, cold/warm reads, and bounded provider rate-limit behavior. Treat the 8.84 s cold PKU sample as preliminary evidence.
+- [ ] Test 1/10/100/1000 concurrent readers, sequential open/close of many files, large directories, slow providers, cancellation, and repeated scans mixed with a hot working set.
+- [ ] Verify `.metadata_never_index` behavior at a normal user mount; measure the remaining Finder/QuickLook demand rather than assuming the marker prevents it.
+
+Acceptance: controlled allocations stay within their budgets; sequential browsing releases read state; scans do not evict the reusable working set as plain LRU would; report read amplification, first-byte latency, hit rate, and process-memory overhead. Read-ahead, block size, digest threshold, and TTL have measured defaults.
+
+## Persistent storage and read delivery
+
+- [ ] Implement [the cache design](docs/persistent-block-cache.md) under one daemon owner and one shared VFS.
+- [x] Key entries by AccountID, ProviderID, ObjectID, ContentVersion, size, and range; use namespace-tagged fan-out directories.
+- [ ] Retain the five-rule declared-digest path alongside exact range fills; select it by object capability and measured whole-file policy.
+- [ ] Coalesce concurrent fills with independently cancellable waiters; reserve memory and temporary disk capacity before starting work.
+- [x] Store complete temporary entries and publish by atomic rename. Validate header, length, key, and payload on first hit; remove corruption and refill through the same verified read contract.
+- [x] Rebuild byte usage and recency by background stat-only scanning. Permit valid hits during scanning; keep new disk allocation within known capacity.
+- [x] Recover approximate recency from batched mtime updates; rebuild 2Q reuse/ghost history in memory. No database is required for the initial block index.
+- [ ] Use confined file opens and platform-specific ownership/link rules. Implement Windows file-sharing/deletion behavior inside the storage adapter.
+- [x] Return successfully validated data even when retention fails. Cache write failure changes retention, not the selected read revision.
+- [ ] Add info/clear/prune/verify controls and per-account persistence policy to the complete daemon API.
+- [ ] Test restart hits, concurrent native/CLI reads, corruption, torn entries, byte budgets, pinned entries, cleanup, and account isolation.
+
+Acceptance: an unchanged resolved revision can reuse persisted bytes after daemon restart; changed revisions select different entries; cache failures preserve valid reads; native snapshots remain coherent through warm hits. Native platform and provider results are reported independently within the complete delivery.
+
+## Evidence carried forward
+
+| Evidence | Current result | Remaining work |
 | --- | --- | --- |
-| FSKit persistent object IDs | Passed for immediate guardrail | `supportsPersistentObjectIDs` is now `false`; a PKU volume still installs, mounts, and lists. Restore persistent IDs only with a daemon-owned mapping. |
-| WebDAV recursive PROPFIND | Passed | `Depth: 1` returns 207 and `Depth: infinity` returns 403. Keep the regression test. |
-| Repeated macOS security prompts | Passed for unchanged state | Lazily refresh credentials, skip unchanged state writes, and stop rewriting ACLs. Real Baidu and PKU `ls` completed after rebuild without a prompt. AccountID-keyed items remain the long-term cleanup. |
-| FSKit extension restart | Failed, blocking | Killing the extension left the mounted child returning `ENOENT`; the one-use capability did not reconnect. This is why UDS/XPC and signed peer identity remain on the critical path. |
-| Baidu digest eligibility | Failed for default caching, partial evidence | Of 823 scanned files, 116 had canonical 32-hex MD5 values and 707 did not. Five canonical samples matched download, repeat read, and range bytes. Keep persistent caching off; test duplicate content and remote mutation next. |
-| Cold/warm FSKit read | Preliminary only | A PKU PDF's first 1 KiB read took 8.84 s; the immediate repeat was effectively instant. This shows 4 MiB fill amplification on cold reads, not enough evidence to lock block size or read-ahead. |
-| Folder listing latency | Preliminary only | Three CLI root listings took 2.74–3.71 s for Baidu and 3.45–3.67 s for PKU including process startup and login restore. No Finder relist or provider-call count exists yet. |
-| Metadata indexing protection | Inconclusive | The temporary `/tmp` FSKit mount reported indexing disabled, which may not represent a normal home-directory mount. Test `.metadata_never_index`, Spotlight, and QuickLook at a real mount before claiming protection. |
-| Linux FUSE identity | Blocked by environment | This macOS machine has no `/dev/fuse`, `fusermount3`, Linux VM, or container runtime. Cross-build passes; native `st_ino`, readdir `d_ino`, lookup/getattr, and remount behavior still require a Linux host or CI runner. |
-| In-memory cap | Not implemented | Per-handle blocks remain unbounded. Implement the global budget and a thousand-handle memory test before persistent caching. |
+| PKU/Baidu login and reads | Real-account CLI and FSKit paths exercised | Full new read-contract acceptance |
+| Keychain write churn | Unchanged state no longer rewrites credentials | Preserve this behavior in service integration |
+| FSKit persistent IDs | Declaration set to false; mount/list passed | Native identity and lifetime tests |
+| Extension termination | Mounted child returned ENOENT | Complete lifecycle recovery; distinguish connection, volume, and read recovery |
+| go-fuse duplicate StableAttr | Independent library and allocator/generation regressions pass | Native inode/FORGET verification |
+| Native Linux/Windows mounts | Shared contract and separate Actions jobs added | Run against the selected GitHub repository |
+| Baidu MD5 | 116/823 canonical values; five downloaded samples matched | Mutation, duplicates, concurrency; object-specific eligibility |
+| Finder/read latency | Preliminary CLI and small-read timings | Instrumented workloads and measured policy |
+| WebDAV | Implementation and tests deleted on 2026-10-28 | Lowest-priority independent rewrite |
 
-## 0.2 Namespace and local service foundation
+## Other product work
 
-### A0. Contract correction and immediate guardrails
+- [ ] Aggregate multi-account views with per-account sessions, identities, and quotas.
+- [ ] Add Google Drive, OneDrive, S3, and investigate an iCloud integration based on an explicit supported access mechanism.
+- [ ] Define safe mutations, expected-version checks, private staging, publication, and recovery journals; cross-account rename is `EXDEV`.
+- [ ] Add native GUI/mobile hosts over the shared service contracts.
+- [ ] Add signing, notarization, packaging, updates, and the authenticated external-provider SDK.
 
-- [x] Replace the documented global version invariant with the object-scoped rule: for one `AccountID + ProviderID + ObjectID`, equal non-empty `ContentVersion` implies equal size and bytes; different objects may share a version token.
-- [ ] Implement the object-scoped ContentVersion model in the provider API and broker wire format.
-- [x] Change the FSKit extension to declare `supportsPersistentObjectIDs = false` until a daemon-owned persistent `NodeKey` mapping exists.
-- [ ] Replace unbounded per-handle blocks with a global, configurable memory budget; retain no more than one useful block per active handle under that budget.
-- [ ] Make metadata TTL configurable per provider/session and add an explicit invalidation command. Do not keep a fixed 2-second remote default without measurements.
-- [ ] Render a synthetic `.metadata_never_index` on macOS when it does not collide with a remote object, then verify Finder, Spotlight, and QuickLook behavior on a real FSKit volume.
-- [x] Reject WebDAV `PROPFIND` with `Depth: infinity`.
-- [x] Stop redundant credential-store writes and PKU's unconditional token refresh; verify unchanged real accounts do not prompt on every command.
-- [ ] Add regression tests proving no cache is enabled for a provider or object that lacks the required revision guarantees.
+## Lowest priority: WebDAV and existing-account migration
 
-Acceptance: FSKit no longer claims persistent IDs it cannot resolve; memory stays within the configured cap during a synthetic thousand-handle workload; a remote provider is not queried for every metadata access solely because of a hard-coded TTL; metadata indexing and WebDAV recursive walks cannot trigger an unbounded scan.
+These features are placed after the filesystem, daemon, cache, platform, and other product work. Neither is a prerequisite for that work.
 
-### A. Account binding identity
+- [x] Hard-delete the existing WebDAV implementation, tests, broker route, CLI options, and documentation. Leave no compatibility stubs, disabled branches, or replacement implementation.
+- [ ] Reimplement WebDAV as an independent consumer of the final namespace/VFS contract. Define authentication, ETag, ranges, and client acceptance in that new implementation.
+- [ ] Add a WebDAV client provider as separate protocol coverage.
+- [ ] Convert existing v1 saved accounts when that compatibility feature is implemented. Preserve current credential locators as stable CredentialRef values while atomically adding AccountID to account metadata; new accounts use AccountID-based references.
+- [ ] Test existing-account conversion with a fake credential store. Conversion does not move/rewrite Keychain items or require a cross-store migration journal.
 
-- [ ] Implement [docs/namespace-contract.md](docs/namespace-contract.md).
-- [ ] Add an opaque random `AccountID` to each saved account; never derive or reuse it.
-- [ ] Migrate the account store atomically to the new version and fail closed if migration cannot complete.
-- [ ] Store each credential item under `AccountID` and migrate existing Keychain/Secret Service/Credential Manager items by local alias; account rename then no longer moves secrets.
-- [ ] Add a versioned, non-secret binding fingerprint beside AccountID. Enumerate provider-specific binding fields explicitly and verify the fingerprint at load time.
-- [ ] Preserve an account ID for credential/state rotation with an unchanged binding; rotate it only when the declared binding fields change.
-- [ ] Treat a fingerprint mismatch as a fail-closed account-state error that requires explicit reauthentication; do not silently reuse the old namespace.
-- [ ] Enforce case-insensitive, cross-platform account aliases and reserve FuseDock's virtual names.
-- [ ] Test migration rollback, credential-item collisions, renamed aliases, and re-created accounts.
-
-Acceptance: an unchanged binding keeps its ID across restart and reauthentication; renaming leaves credentials and namespace accessible; changing any declared binding field rotates the ID and invalidates old capabilities and cache entries; a fingerprint mismatch blocks the account instead of reading through it.
-
-### B. Reconnectable daemon and control plane
-
-- [ ] Add a long-running local daemon that owns provider sessions, VFS state, the block cache, and broker data-plane endpoints.
-- [ ] Supervise it as a user login service with launchd on macOS, systemd user units on Linux, and a future Windows service/tray host.
-- [ ] Replace the one-use-only FSKit access model with a UDS/XPC connection that authenticates peer code signing/OS identity and can reconnect after extension restart.
-- [ ] Make data-capability authorization target-scoped and revocable; do not require the CLI to remain alive for an already configured mount to reconnect.
-- [ ] Define a binary data-plane protocol using raw response bodies or explicit length-prefixed binary frames. Never base64-encode file payloads in control JSON.
-- [ ] Add a local-only control API for account selection, service status, mount lifecycle, WebDAV enable/disable, cache clearing, and diagnostics.
-- [ ] Make the control API versioned and authorize it separately from FSKit, WebDAV, and data-plane credentials. Do not expose account operations over unauthenticated TCP.
-- [ ] Restore configured accounts, mounts, and WebDAV endpoints after daemon restart or login.
-- [ ] Stop the daemon only after active operations are allowed to finish; provide a force-stop path for host destruction and explicit user actions.
-- [ ] Keep logs bounded and redact credentials, cookies, signed URLs, tokens, and file contents.
-- [ ] Expose `ready`/`reauth_required` state, last error, active operations, account state, cache statistics, and version data through the local API.
-- [ ] Keep mounts alive through reauthentication: surface `EACCES` while credentials are invalid, then resume reads after CLI/GUI login without unmount/remount.
-- [ ] Add one request ID across extension/CLI, daemon, VFS, and provider calls; diagnostics must not include file contents or signed URLs.
-- [ ] Add loopback port occupancy and stale-endpoint diagnostics. A stale port can produce Finder's misleading NetAuthAgent message even when credentials are correct.
-
-The extension-restart preflight already fails with `ENOENT`, confirming that capability lifecycle is a correctness/availability gate rather than a later security cleanup.
-
-Acceptance: a machine reboot restores the service and endpoints; an FSKit extension killed and restarted reconnects without a CLI running; reauthentication moves the account from `reauth_required` to `ready` without losing the mount; no file payload crosses the control plane as base64.
-
-### C. Provider revision contract and conformance
-
-- [ ] Add optional `RevisionReader` and session-level capability interfaces instead of a parallel long-lived provider SDK v2. Missing interfaces mean current-revision-only behavior and no persistent cache.
-- [ ] Let factory capabilities state an upper bound and session probing narrow them. Per-object opt-out must also be possible.
-- [ ] Require every remote request from a revision-bound Reader to use the same `ContentVersion`: range GETs, redirects, signed-URL renewal, retries, and metadata refresh included.
-- [ ] Return `ErrConflict` when a requested revision no longer exists, when a conditional request is ignored, when the server returns 200 instead of a validated 206, or when total size/range/ETag differs from the requested snapshot.
-- [ ] Use `If-Match` with a strong ETag for conditional reads. Do not use `If-Range` as the exact-version gate; a failed `If-Range` may produce a full 200 response.
-- [ ] Validate `206`, `Content-Range`, full size, and response ETag on every conditional request.
-- [ ] Add optional full-file digest metadata with algorithm and coverage. Treat MD5 as a compatibility/accidental-change check, not a security guarantee.
-- [ ] Implement the five-rule whole-file digest path: metadata-declared digest embedded in ContentVersion; compare against the `OpenRead` snapshot, never a fresh Stat; whole-object only; mismatch is `ErrConflict` with no publish; provider digest passes modification, duplicate-content, and concurrency tests. Keep range caching disabled for this path.
-- [ ] Add two-session mutation tests: one session changes or replaces the file while another reads open ranges. Cover every boundary and ensure no handle mixes revisions.
-- [ ] Probe fresh and renewed signed URLs, revision rollback, online editing, and restart behavior for PKU.
-- [ ] Keep Baidu persistent caching off until its dlink/MD5 path passes equivalent tests. Reuse `FUSEDOCK_LIVE_ACCOUNTS=1` fixture results: only canonical 32-hex fields are candidates, and 707/823 observed fields were not MD5.
-- [ ] Add duplicate-content, one-copy-modified, rename, shared-file, and concurrent-mutation tests before enabling even the Baidu whole-file digest path.
-- [ ] Update `pkg/providertest` to exercise capabilities, exact revisions, concurrent mutation, short reads, oversized responses, and cancellation.
-- [ ] Audit PKU, Baidu, local, broker, and future providers; document capability evidence rather than inferred behavior.
-
-Acceptance: conformance fails a provider that caches a weak version or binds only the initial `OpenRead`; a remote update during a handle read cannot return mixed-version bytes; PKU passes revision-bound range tests; Baidu passes only the explicitly proven whole-file digest path.
-
-### D. Namespace, platform identity, and volume lifecycle
-
-- [ ] Add a resolver that returns `NodeKey` plus the exact `ObjectRevision` from a trusted session.
-- [ ] Change broker wire requests to carry NodeKey/object ID and expected revision only; the daemon resolves the authoritative Object from session state.
-- [ ] Replace FUSE bare-ID inode hashing with a NodeKey-to-node map, stable within a mount and collision-safe. On Linux, force two distinct objects to the same `StableAttr.Ino` and demonstrate that go-fuse returns the previously known Inode; then verify the NodeKey mapping prevents that failure. Test protocol node IDs separately from user-visible `st_ino`.
-- [ ] For FSKit, keep `supportsPersistentObjectIDs = false` now. Either retain that until a daemon-owned persistent NodeKey map exists, or implement the map and resolve arbitrary persisted identifiers correctly.
-- [ ] Derive FSKit volume UUID as UUIDv5 over a versioned encoding of AccountID and normalized scope; reject a duplicate AccountID+scope mount while allowing distinct scopes.
-- [ ] Ensure single-account and aggregate views resolve the same remote object to the same NodeKey.
-- [ ] Replace bare provider Object IDs in session maps with namespaced keys and add collision tests across two accounts and two mounts.
-
-Acceptance: identical provider IDs in two accounts cannot alias nodes; a remount of the same account/scope uses the same FSKit volume identity; an extension restart can resolve persisted identifiers only when the configured mapping actually supports it.
-
-### E. Runtime behavior and measured defaults
-
-- [ ] Document retry ownership: providers own HTTP retries and `Retry-After`; VFS does not retry network reads. A one-time pre-byte re-resolution after `ErrConflict` is allowed, never after partial bytes.
-- [ ] Add one provider error -> VFS error -> errno/HTTP mapping table. Map read-handle conflict to `ESTALE` and write conflict to `EBUSY`.
-- [ ] Add explicit object kinds/capabilities for provider-native documents, shortcuts, exports, and unknown-size objects. Do not expose an unknown-size export as an ordinary file.
-- [x] Capture preliminary PKU/Baidu CLI listing latency and FSKit cold/warm small-read measurements in [docs/prerequisite-test-results.md](docs/prerequisite-test-results.md).
-- [ ] Add provider-call and byte counters to the shared daemon path. Record List/Stat calls during 60 seconds after opening and scrolling a Finder window, and record when Baidu starts returning rate limits. Treat 30–60 seconds only as an example interval, never a hard-coded default.
-- [ ] Benchmark per-request latency and range throughput with instrumentation, cache-hit cost, and memory use at 1/10/100/1000 handles.
-- [ ] Use those measurements to set block size, read-ahead, in-memory cap, metadata TTL, and whole-file threshold. Record the baseline in the design docs.
-- [ ] Run an A/B block-size test against the same cold files and a real Finder/QuickLook mount at a normal home-directory path.
-- [ ] Add CLI invalidation for metadata and cache when a user needs an immediate refresh.
-
-Acceptance: defaults have measurements and documented provider-specific values; retries cannot multiply across layers; stale metadata refresh is explicit and bounded; unknown-size/provider-native objects have defined surface behavior.
-
-### F. Persistent block cache
-
-- [ ] Implement the design in [docs/persistent-block-cache.md](docs/persistent-block-cache.md).
-- [ ] Make one broker/daemon process the cache owner and pass one cached VFS session to FSKit and WebDAV.
-- [ ] Remove duplicate per-handle block caching where it would compete with the shared cache.
-- [ ] Store blocks under `entries/<namespaceTag>/<keyHash[:2]>/<keyHash>.blk`; use the namespace tag only for isolation, accounting, and clear.
-- [ ] Use a background stat-only scan (size and mtime) for budget/LRU. Until enough metadata is available, remain conservative and avoid overcommitting. Defer header and payload SHA-256 validation to first hit; track a verified flag and delete/refill on mismatch.
-- [ ] Avoid per-block `fsync` and directory `fsync` by default. Atomically rename a complete temp file, detect torn files after crash by header/hash, and provide an optional conservative sync mode.
-- [ ] Recover LRU order from file mtime/touch metadata in batches; do not write one access timestamp per small read.
-- [ ] Open block files through a confined root with no-follow semantics and validate the opened object, avoiding lstat/open races.
-- [ ] Keep a global memory budget and global fill concurrency budget independent of disk budget.
-- [ ] Support per-account disable of persistent data caching and per-object opt-out.
-- [ ] Gate the small-file whole-file digest path on the five rules above and measured digest reliability; never extend that exception to unverified range reads.
-- [ ] Add cache info, clear, prune, and integrity-check commands.
-- [ ] Add metrics for hit rate, coalesced fetches, network bytes, evicted bytes, corruption, verification cost, and cache write failures.
-- [ ] Do not add bbolt for the initial block index; revisit only if measured startup or lookup cost requires it.
-
-Acceptance: reopening an unchanged file after daemon restart serves cached ranges without a provider data call; any unverified revision cannot produce a disk hit; corruption or a torn crash file is removed and safely refilled; daemon startup and cache hits remain responsive at the documented budget.
-
-### G. Stable WebDAV and loopback operations
-
-- [ ] Store the WebDAV Basic-auth credential in Keychain, Secret Service, or Credential Manager instead of regenerating a token on every broker start.
-- [ ] Provide explicit rotate/revoke operations and show the active endpoint and credential source in the control UI.
-- [ ] Keep a persistent read-only WebDAV URL usable across daemon restarts; keep the fixed loopback port by default once it is available.
-- [ ] Preserve exact-origin browser restrictions; never add wildcard CORS.
-- [ ] Add connection diagnostics for Finder's ECONNREFUSED/ErrorNumber 61 case and for stale endpoints.
-- [ ] Emit a strong ETag only from a strong ContentVersion; otherwise emit a weak ETag or omit it.
-
-Acceptance: Finder can reconnect after a daemon restart using the same saved server entry; a revoked credential stops working; clients cannot mistake a weak version for a strong ETag.
-
-## 0.3 Multi-account and broader access
-
-### Multi-account virtual root
-
-- [ ] Allow one broker session to expose several saved accounts, for example /pku, /baidu, and /onedrive.
-- [ ] Give each account an independent provider session, refresh lock, cache namespace, and inode namespace keyed by its immutable account ID.
-- [ ] Reject cross-account rename with EXDEV before any remote mutation.
-- [ ] Deduplicate shared quota only when account/server/library identity proves it is the same backing store.
-- [ ] Support single-account and aggregate views in FSKit, WebDAV, CLI, and future GUI surfaces.
-- [ ] Add account removal/relogin while the daemon is running without resurrecting removed sessions.
-
-### WebDAV client provider
-
-- [ ] Implement FuseDock's own WebDAV client as a read-only provider.
-- [ ] Handle redirects, credentials, TLS validation, PROPFIND pagination/depth, byte ranges, ETags, and server-specific quirks safely.
-- [ ] Use it for Nextcloud, NAS, and services without a native FuseDock provider.
-- [ ] Keep proxy behavior explicit and never forward credentials to a redirect origin without validation.
-
-### Additional providers
-
-- [ ] S3-compatible provider with endpoint configuration, list continuation, ETags, range reads, and optional static credentials.
-- [ ] OneDrive through Microsoft Graph with OAuth PKCE and stable item IDs.
-- [ ] Google Drive with PKCE, shared-drive/shortcut semantics, and an explicit Google Docs export policy.
-- [ ] Complete Baidu live coverage for pagination, rate limits, shared files, and cloud-specific file types.
-- [ ] Add a provider conformance fixture that exercises every item in the shared runbook.
-
-### Platform drivers
-
-- [ ] Run native Linux FUSE acceptance on a FUSE-enabled host or CI runner; the current macOS-only machine cannot execute this gate.
-- [ ] Re-run macOS FSKit acceptance after daemon deployment and extension updates.
-- [ ] Add a WinFsp/cgofuse backend with native Windows mount, range-read, rename, and unmount tests.
-- [ ] Add a signed Windows service/tray host and protected cache/credential directory handling.
-- [ ] Evaluate a gRPC or CBOR sidecar protocol for non-Go providers only after the native provider contract is stable.
-
-## 0.4 Safe writes
-
-- [ ] Define mutation capabilities and revision semantics separately from the read contract.
-- [ ] Stage writes in a private local directory and record the expected remote version.
-- [ ] Publish on fsync/close and only then acknowledge durable success.
-- [ ] Map version conflicts to EBUSY; never overwrite a newer remote revision silently.
-- [ ] Retain failed staged files and recovery journals with correct account/provider/object identity.
-- [ ] Support create, overwrite, truncate, append, mkdir, remove, and same-backend rename.
-- [ ] Reject cross-account and cross-provider rename with EXDEV.
-- [ ] Enable WebDAV write methods only when the selected provider supports them and the token has write capability.
-- [ ] Add conflict, interrupted-upload, crash-recovery, disk-full, and concurrent-editor fixtures.
-
-## 0.5 Distribution and ecosystem
-
-- [ ] Add macOS signing, notarization, app bundle release, and FSKit extension upgrade handling.
-- [ ] Add Windows signing and WinFsp packaging.
-- [ ] Add Homebrew and other installer channels.
-- [ ] Add automatic update and rollback paths with signed release metadata.
-- [ ] Version and document the local control protocol and provider sidecar protocol.
-- [ ] Publish a provider test harness and conformance results.
-- [ ] Add crash-safe cache/session migrations that can be rolled back.
-
-## Cross-cutting work
-
-- [ ] Keep all privileged or secret-bearing operations out of the FSKit extension sandbox; use the authenticated broker/daemon boundary.
-- [ ] Keep the FSKit extension able to reconnect after process restart through a signed peer identity; one-use bootstrap files cannot be the only lifecycle mechanism.
-- [ ] Add a single security review template covering new providers, access surfaces, cache payloads, and write privileges.
-- [ ] Add fuzz tests for WebDAV paths/XML, broker JSON, cache headers, and provider path components.
-- [ ] Add performance benchmarks for metadata/relist calls, Finder/QuickLook patterns, cold/warm reads, small-file workloads, large-file ranges, memory use, cache eviction, and concurrent clients.
-- [ ] Add structured diagnostics with a user-facing export command and strict secret redaction.
-- [ ] Keep Linux/macOS/Windows cross-builds and platform-native tests in CI.
-- [ ] Update the user docs and threat model whenever a capability becomes writable, network-visible, or persisted.
-- [ ] Add explicit non-goals: offline bidirectional sync, collaborative editing, remote POSIX locks, and transparent cross-provider conflict merging.
-
-## Current safeguards that must remain true
-
-- No account password or refresh token in accounts.json or the data cache.
-- FSKit filesystem-extension access remains read-only until the mutation contract exists.
-- WebDAV remains loopback-only and rejects unlisted browser origins.
-- Provider names/IDs are not trusted as local paths.
-- Weak or synthetic versions, metadata fingerprints, and Stat-before/after checks never authorize persistent data caching.
-- File payloads never traverse a control protocol as JSON/base64.
-- FSKit persistent object IDs remain false until an actual durable mapping exists.
-- Signed object-storage URLs never appear in logs or errors.
-- One unused or corrupt cache entry can be discarded without failing a valid remote read.
-- Cache is an optimization; cache-disk failure must not be reported as successful persistence of user data.
+Existing saved accounts and system credential items were not modified during this implementation work.

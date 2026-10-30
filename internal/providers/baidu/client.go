@@ -13,7 +13,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/xuehaonan/fusedock/pkg/provider"
+	"github.com/xuehaonan27/fusedock/pkg/provider"
 )
 
 const (
@@ -363,4 +363,20 @@ func (c *client) close() {
 	c.api.CloseIdleConnections()
 	c.oauth.CloseIdleConnections()
 	c.download.CloseIdleConnections()
+}
+
+func (c *client) stat(ctx context.Context, id string) (meta, error) {
+	var result listResponse
+	query := url.Values{"method": {"filemetas"}, "fsids": {"[" + id + "]"}, "dlink": {"0"}}
+	if err := c.apiRequest(ctx, "/rest/2.0/xpan/multimedia", query, &result); err != nil {
+		return meta{}, err
+	}
+	if len(result.List) != 1 {
+		return meta{}, provider.ErrNotFound
+	}
+	m := result.List[0].meta("")
+	if m.ID != id {
+		return meta{}, provider.ErrConflict
+	}
+	return m, nil
 }

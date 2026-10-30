@@ -18,8 +18,8 @@ import (
 	"sync"
 	"time"
 
-	brokerapi "github.com/xuehaonan/fusedock/internal/broker"
-	"github.com/xuehaonan/fusedock/pkg/provider"
+	brokerapi "github.com/xuehaonan27/fusedock/internal/broker"
+	"github.com/xuehaonan27/fusedock/pkg/provider"
 )
 
 type Factory struct{}
@@ -28,11 +28,12 @@ func New() Factory { return Factory{} }
 
 func (Factory) Descriptor() provider.Descriptor {
 	return provider.Descriptor{
-		ContractVersion: provider.ContractVersion,
-		ID:              "broker",
-		Name:            "FuseDock account broker",
-		Description:     "Read-only loopback access to a broker holding a saved account session.",
-		Capabilities:    provider.CapRead,
+		ContractVersion:  provider.ContractVersion,
+		ID:               "broker",
+		Name:             "FuseDock account broker",
+		Description:      "Read-only loopback access to a broker holding a saved account session.",
+		Capabilities:     provider.CapRead,
+		ReadCapabilities: provider.ReadCapabilities{StableObjectID: true, ExactRange: true, DeclaredDigest: true},
 		Options: []provider.OptionSpec{
 			{Key: "endpoint", Description: "Loopback broker endpoint", Required: true},
 		},
@@ -53,14 +54,14 @@ func (Factory) Open(ctx context.Context, req provider.OpenRequest) (provider.Ses
 	}
 	client := &client{base: base, transport: brokerTransport(base)}
 	var claim brokerapi.ClaimResponse
-	if err := client.post(ctx, "/v1/claim", bootstrap, struct{}{}, &claim); err != nil {
+	if err := client.post(ctx, "/v2/claim", bootstrap, struct{}{}, &claim); err != nil {
 		return nil, fmt.Errorf("claim broker capability: %w", err)
 	}
 	if claim.Version != brokerapi.ProtocolVersion || len(claim.Token) < 32 {
 		return nil, errors.New("broker returned an incompatible capability response")
 	}
 	client.setToken(claim.Token)
-	return &Session{client: client}, nil
+	return &Session{client: client, caps: claim.Capabilities}, nil
 }
 
 type client struct {
@@ -113,6 +114,7 @@ func (c *client) post(ctx context.Context, path, token string, input, output any
 }
 
 type Session struct {
+	caps   provider.ReadCapabilities
 	client *client
 	mu     sync.Mutex
 	closed bool
@@ -120,7 +122,7 @@ type Session struct {
 
 func (s *Session) Root(ctx context.Context) (provider.Object, error) {
 	var object provider.Object
-	if err := s.client.post(ctx, "/v1/root", s.client.dataToken(), struct{}{}, &object); err != nil {
+	if err := s.client.post(ctx, "/v2/root", s.client.dataToken(), struct{}{}, &object); err != nil {
 		return provider.Object{}, err
 	}
 	return validateObject(object, "")
@@ -132,7 +134,7 @@ func (s *Session) List(ctx context.Context, parent provider.Object) ([]provider.
 	}
 	var objects []provider.Object
 	request := brokerapi.ListRequest{ParentID: parent.ID}
-	if err := s.client.post(ctx, "/v1/list", s.client.dataToken(), request, &objects); err != nil {
+	if err := s.client.post(ctx, "/v2/list", s.client.dataToken(), request, &objects); err != nil {
 		return nil, err
 	}
 	seen := make(map[string]bool, len(objects))
@@ -152,8 +154,8 @@ func (s *Session) List(ctx context.Context, parent provider.Object) ([]provider.
 
 func (s *Session) Stat(ctx context.Context, object provider.Object) (provider.Object, error) {
 	var result provider.Object
-	request := brokerapi.StatRequest{Object: object}
-	if err := s.client.post(ctx, "/v1/stat", s.client.dataToken(), request, &result); err != nil {
+	request := brokerapi.StatRequest{ObjectID: object.ID}
+	if err := s.client.post(ctx, "/v2/stat", s.client.dataToken(), request, &result); err != nil {
 		return provider.Object{}, err
 	}
 	return validateObject(result, object.ParentID)
@@ -166,7 +168,19 @@ func (s *Session) OpenRead(ctx context.Context, object provider.Object) (provide
 	if object.ID == "" || object.Size < 0 {
 		return nil, errors.New("broker file metadata is incomplete")
 	}
-	return &reader{session: s, object: object}, nil
+	var opened brokerapi.OpenResponse
+	request := brokerapi.OpenRequest{ObjectID: object.ID}
+	if s.caps.ExactRange && object.ContentVersion != "" {
+		revision := object.Revision()
+		request.Revision = &revision
+	}
+	if err := s.client.post(ctx, "/v2/open", s.client.dataToken(), request, &opened); err != nil {
+		return nil, err
+	}
+	if opened.Handle == "" || opened.Snapshot.ID != object.ID {
+		return nil, errors.New("invalid broker read handle")
+	}
+	return &reader{session: s, object: opened.Snapshot, handle: opened.Handle}, nil
 }
 
 func (s *Session) Close() error {
@@ -179,13 +193,14 @@ func (s *Session) Close() error {
 	s.mu.Unlock()
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
-	_ = s.client.post(ctx, "/v1/close", s.client.dataToken(), struct{}{}, nil)
+	_ = s.client.post(ctx, "/v2/close", s.client.dataToken(), struct{}{}, nil)
 	s.client.transport.CloseIdleConnections()
 	s.client.setToken("")
 	return nil
 }
 
 type reader struct {
+	handle  string
 	session *Session
 	object  provider.Object
 	mu      sync.Mutex
@@ -206,12 +221,12 @@ func (r *reader) ReadAt(ctx context.Context, dest []byte, offset int64) (int, er
 		return 0, nil
 	}
 	length := min(int64(len(dest)), r.object.Size-offset)
-	request := brokerapi.ReadRequest{Object: r.object, Offset: offset, Length: length}
+	request := brokerapi.ReadRequest{Handle: r.handle, Offset: offset, Length: length}
 	data, err := json.Marshal(request)
 	if err != nil {
 		return 0, err
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, r.session.client.base.String()+"/v1/read", bytes.NewReader(data))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, r.session.client.base.String()+"/v2/read", bytes.NewReader(data))
 	if err != nil {
 		return 0, err
 	}
@@ -242,9 +257,15 @@ func (r *reader) ReadAt(ctx context.Context, dest []byte, offset int64) (int, er
 
 func (r *reader) Close() error {
 	r.mu.Lock()
+	if r.closed {
+		r.mu.Unlock()
+		return nil
+	}
 	r.closed = true
 	r.mu.Unlock()
-	return nil
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	return r.session.client.post(ctx, "/v2/release", r.session.client.dataToken(), brokerapi.ReleaseRequest{Handle: r.handle}, nil)
 }
 
 func validateEndpoint(raw string) (*url.URL, error) {
@@ -310,4 +331,16 @@ func decodeResponseError(resp *http.Response) error {
 		return provider.ErrPermission
 	}
 	return fmt.Errorf("broker request failed with HTTP %d", resp.StatusCode)
+}
+
+func (r *reader) Snapshot() provider.Object { return r.object }
+
+func (s *Session) ReadCapabilities(context.Context) (provider.ReadCapabilities, error) {
+	return s.caps, nil
+}
+func (s *Session) OpenReadRevision(ctx context.Context, r provider.ObjectRevision) (provider.Reader, error) {
+	if !s.caps.ExactRange {
+		return nil, provider.ErrUnsupported
+	}
+	return s.OpenRead(ctx, provider.Object{ID: r.ObjectID, Kind: provider.KindFile, Size: r.Size, ContentVersion: r.ContentVersion, Digest: r.Digest})
 }

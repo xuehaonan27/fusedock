@@ -28,7 +28,7 @@ test-live-pku:
 	FUSEDOCK_LIVE_PKU=1 go test -count=1 -run '^TestLivePKULoginPage$$' -v ./internal/providers/pku
 
 test-fuse:
-	FUSEDOCK_FUSE_TEST=1 go test -count=1 -run '^TestLocalProviderMount$$' -v ./internal/fusefs
+	FUSEDOCK_FUSE_TEST=1 go test -count=1 -run '^TestLocalProviderMount$$' -v ./internal/driver/linux
 
 vet:
 	go vet ./...
@@ -46,3 +46,20 @@ check:
 
 clean:
 	rm -rf bin
+
+.PHONY: test-core test-gofuse test-linux test-macos test-windows
+
+test-core:
+	go test -race ./pkg/... ./internal/accounts ./internal/credentials ./internal/namespace ./internal/blockcache ./internal/vfs ./internal/broker ./internal/providers/... ./internal/localtransport ./internal/daemon ./internal/cli
+
+test-gofuse:
+	go test -race ./internal/driver/gofuse
+
+test-linux:
+	FUSEDOCK_FUSE_TEST=1 go test -count=1 -v ./internal/driver/linux
+
+test-macos:
+	FUSEDOCK_FSKIT_TEST=1 go test -count=1 -v ./internal/driver/fskit
+
+test-windows:
+	CGO_ENABLED=0 FUSEDOCK_WINFSP_TEST=1 go test -count=1 -v ./internal/driver/winfsp

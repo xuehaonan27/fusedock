@@ -2,124 +2,174 @@ package vfs
 
 import (
 	"context"
+	"encoding/hex"
 	"errors"
+	"fmt"
 	"io"
 	"sync"
+	"sync/atomic"
+	"time"
 
-	"github.com/xuehaonan/fusedock/pkg/provider"
+	"github.com/xuehaonan27/fusedock/internal/blockcache"
+	"github.com/xuehaonan27/fusedock/internal/namespace"
+	"github.com/xuehaonan27/fusedock/pkg/provider"
 )
 
 const defaultReadBlock = int64(4 << 20)
 
-// reader coalesces the small reads issued by a file-system driver into larger
-// provider ranges. It retains one block per open handle; a global disk cache is
-// a separate layer and is not claimed by this implementation.
-type reader struct {
-	provider.Reader
-	size  int64
-	block int64
+var nextAccess atomic.Uint64
 
-	mu     sync.Mutex
-	start  int64
-	data   []byte
-	loaded bool
-	closed bool
+type reader struct {
+	session               *Session
+	snapshot              provider.Object
+	remote                provider.Reader
+	exact, whole, persist bool
+	access                uint64
+	scope                 string
+	block                 int64
+	mu                    sync.RWMutex
+	closed                bool
+	ctx                   context.Context
+	cancel                context.CancelFunc
 }
 
 func (s *Session) OpenRead(ctx context.Context, object provider.Object) (provider.Reader, error) {
+	if object.IsDir() {
+		return nil, provider.ErrNotDirectory
+	}
 	if object.Size < 0 {
 		return nil, errors.New("cannot read an object with unknown size")
 	}
-	handle, err := s.Session.OpenRead(ctx, object)
+	caps, err := provider.CapabilitiesFor(ctx, s.Session)
 	if err != nil {
 		return nil, err
 	}
-	return &reader{Reader: handle, size: object.Size, block: defaultReadBlock}, nil
+	_, revisionReader := s.Session.(provider.RevisionReader)
+	exact := caps.ExactRange && revisionReader && object.ContentVersion != ""
+	whole := !exact && caps.DeclaredDigest && object.Digest.Valid() && object.ContentVersion != "" && object.Size <= s.wholeFileLimit
+	r := &reader{session: s, snapshot: object, exact: exact, whole: whole, access: nextAccess.Add(1), block: min(defaultReadBlock, s.blocks.Limit())}
+	r.persist = (exact || whole) && caps.StableObjectID && s.persistent && !object.NoCache
+	if !exact && !whole {
+		r.scope = fmt.Sprint(r.access)
+	}
+	if whole {
+		r.block = max(object.Size, 1)
+	}
+	r.ctx, r.cancel = context.WithCancel(s.ctx)
+	if !exact {
+		r.remote, err = s.Session.OpenRead(ctx, object)
+		if err != nil {
+			r.cancel()
+			return nil, err
+		}
+		if snapshot, ok := r.remote.(provider.SnapshotReader); ok {
+			if whole && snapshot.Snapshot().Revision() != object.Revision() {
+				r.remote.Close()
+				r.cancel()
+				return nil, provider.ErrConflict
+			}
+			r.snapshot = snapshot.Snapshot()
+		}
+	}
+	s.readersMu.Lock()
+	if s.ctx.Err() != nil {
+		s.readersMu.Unlock()
+		r.cancel()
+		if r.remote != nil {
+			r.remote.Close()
+		}
+		return nil, errors.New("session closed")
+	}
+	s.readers[r] = struct{}{}
+	s.readersMu.Unlock()
+	return r, nil
 }
-
+func (r *reader) Snapshot() provider.Object { return r.snapshot }
 func (r *reader) ReadAt(ctx context.Context, dest []byte, off int64) (int, error) {
-	if off < 0 || off > r.size {
-		return 0, errors.New("read offset is outside the file")
+	if off < 0 {
+		return 0, errors.New("negative read offset")
 	}
-	if len(dest) == 0 || off == r.size {
-		return 0, nil
+	if err := r.ctx.Err(); err != nil {
+		return 0, err
 	}
+	ctx, cancel := context.WithCancel(ctx)
+	stop := context.AfterFunc(r.ctx, cancel)
+	defer stop()
+	defer cancel()
 	if err := ctx.Err(); err != nil {
 		return 0, err
 	}
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	if r.closed {
-		return 0, errors.New("read handle is closed")
+	if len(dest) == 0 || off >= r.snapshot.Size {
+		return 0, nil
 	}
 	written := 0
-	for written < len(dest) && off < r.size {
-		if err := ctx.Err(); err != nil {
+	for written < len(dest) && off < r.snapshot.Size {
+		start := off / r.block * r.block
+		length := min(r.block, r.snapshot.Size-start)
+		key := blockcache.Key{Node: namespace.NodeKey{Namespace: r.session.namespace, ObjectID: r.snapshot.ID}, Version: r.snapshot.ContentVersion, Size: r.snapshot.Size, Offset: start, Length: length, Scope: r.scope}
+		lease, err := r.session.blocks.Acquire(ctx, key, r.persist, r.access, func(fillCtx context.Context, b []byte) error { return r.fill(fillCtx, b, start) })
+		if err != nil {
 			return written, err
 		}
-		if !r.covers(off) {
-			if err := r.load(ctx, off); err != nil {
-				if written > 0 && errors.Is(err, io.EOF) {
-					return written, nil
-				}
-				return written, err
-			}
-		}
-		cacheOffset := off - r.start
-		available := min(int64(len(dest)-written), int64(len(r.data))-cacheOffset)
-		if available <= 0 {
-			return written, io.ErrUnexpectedEOF
-		}
-		copy(dest[written:], r.data[cacheOffset:cacheOffset+available])
-		written += int(available)
-		off += available
+		n := copy(dest[written:], lease.Bytes()[off-start:])
+		lease.Release()
+		written += n
+		off += int64(n)
 	}
 	return written, nil
 }
-
-func (r *reader) covers(off int64) bool {
-	return r.loaded && off >= r.start && off < r.start+int64(len(r.data))
-}
-
-func (r *reader) load(ctx context.Context, off int64) error {
-	start := off / r.block * r.block
-	length := min(r.block, r.size-start)
-	if length <= 0 {
-		return io.EOF
+func (r *reader) fill(ctx context.Context, b []byte, off int64) error {
+	r.session.Counters.Read.Add(1)
+	start := time.Now()
+	defer func() { r.session.Counters.LatencyNanos.Add(uint64(time.Since(start))) }()
+	var source provider.Reader
+	if r.exact {
+		var err error
+		source, err = r.session.Session.(provider.RevisionReader).OpenReadRevision(ctx, r.snapshot.Revision())
+		if err != nil {
+			return err
+		}
+		defer source.Close()
+	} else {
+		r.mu.RLock()
+		defer r.mu.RUnlock()
+		if r.closed {
+			return errors.New("read handle closed")
+		}
+		source = r.remote
 	}
-	buf := make([]byte, int(length))
-	n, err := r.Reader.ReadAt(ctx, buf, start)
-	if n < 0 || n > len(buf) {
-		return errors.New("provider returned an invalid read count")
-	}
+	n, err := source.ReadAt(ctx, b, off)
 	if err != nil && !errors.Is(err, io.EOF) {
 		return err
 	}
-	if n == 0 {
-		if err == nil {
-			err = io.ErrUnexpectedEOF
-		}
-		return err
+	if n != len(b) {
+		return io.ErrUnexpectedEOF
 	}
-	if n < len(buf) {
-		if err == nil {
-			return io.ErrUnexpectedEOF
+	if r.whole {
+		hash, _ := r.snapshot.Digest.Hash()
+		hash.Write(b)
+		if hex.EncodeToString(hash.Sum(nil)) != r.snapshot.Digest.Value {
+			return provider.ErrConflict
 		}
-		return err
 	}
-	r.start, r.data, r.loaded = start, buf, true
 	return nil
 }
-
 func (r *reader) Close() error {
+	r.cancel()
 	r.mu.Lock()
-	r.closed = true
-	r.data = nil
-	handle := r.Reader
-	r.Reader = nil
-	r.mu.Unlock()
-	if handle == nil {
+	defer r.mu.Unlock()
+	if r.closed {
 		return nil
 	}
-	return handle.Close()
+	r.closed = true
+	r.session.readersMu.Lock()
+	delete(r.session.readers, r)
+	r.session.readersMu.Unlock()
+	if r.scope != "" {
+		r.session.blocks.DiscardScope(r.session.namespace, r.scope)
+	}
+	if r.remote != nil {
+		return r.remote.Close()
+	}
+	return nil
 }

@@ -2,20 +2,26 @@ import Foundation
 import FSKit
 
 struct FuseDockObject: Decodable, Sendable {
+    let nodeID: UInt64
+    let parentNodeID: UInt64
     let id: String
     let parentID: String
     let name: String
     let kind: String
     let size: Int64
     let version: String
+    let contentVersion: String
     let modified: Int64
 
     enum CodingKeys: String, CodingKey {
+        case nodeID = "node_id"
+        case parentNodeID = "parent_node_id"
         case id
         case parentID = "parent_id"
         case name
         case kind
         case size
+        case contentVersion = "content_version"
         case version
         case modified
     }
@@ -43,6 +49,12 @@ final class FuseDockBridge {
 
     deinit {
         fusedock_close(token)
+    }
+
+    var volumeID: UUID {
+        guard let value = fusedock_volume_id(token) else { return UUID() }
+        defer { fusedock_free(value) }
+        return UUID(uuidString: String(cString: value)) ?? UUID()
     }
 
     func root() throws -> FuseDockObject {
@@ -86,12 +98,25 @@ final class FuseDockBridge {
         return try Self.decode(value)
     }
 
-    func read(id: String, offset: Int64, length: Int, into buffer: FSMutableFileDataBuffer) throws -> Int {
+    struct OpenRead: Decodable {
+        let handle: UInt64
+        let snapshot: FuseDockObject
+    }
+
+    func openRead(object: FuseDockObject) throws -> OpenRead {
+        var errorPointer: UnsafeMutablePointer<CChar>?
+        guard let value = Self.withCString(object.id, { id in Self.withCString(object.contentVersion, { version in fusedock_open_read(token, id, version, object.size, &errorPointer) }) }) else {
+            throw Self.takeError(errorPointer, fallback: "Could not open the read snapshot")
+        }
+        return try Self.decode(value)
+    }
+
+    func closeRead(handle: UInt64) { fusedock_close_read(token, handle) }
+
+    func read(handle: UInt64, offset: Int64, length: Int, into buffer: FSMutableFileDataBuffer) throws -> Int {
         var errorPointer: UnsafeMutablePointer<CChar>?
         let result: Int64 = buffer.withUnsafeMutableBytes { bytes in
-            Self.withCString(id) {
-                fusedock_read(token, $0, offset, bytes.baseAddress, Int64(length), &errorPointer)
-            }
+            fusedock_read(token, handle, offset, bytes.baseAddress, Int64(length), &errorPointer)
         }
         guard result >= 0 else {
             throw Self.takeError(errorPointer, fallback: "Could not read the provider file")
