@@ -22,8 +22,6 @@ The repository contains a shared namespace, read VFS, persistent block cache, ac
 | Writable mounts | Not implemented; the capability and conflict model is defined in the architecture |
 | Multi-account namespace | Not implemented; a session currently represents one account |
 
-This release should be treated as an architecture baseline and read-only preview, not a complete replacement for each cloud vendor's desktop client.
-
 ## Quick start
 
 Go 1.25 or newer is required. The cache uses root-relative rename and timestamp APIs added in Go 1.25. Building the FSKit application requires macOS 27 and Xcode 27.

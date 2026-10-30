@@ -42,15 +42,15 @@ The shared native contract mounts a fixture and checks directory enumeration, ol
 | `make test-core` | Go toolchain | Passed through the complete Go suite |
 | `make test-gofuse` | Linux or macOS; no mount | Passed |
 | `make test-linux` | Linux with FUSE 3 and `/dev/fuse` | Passed in the first Actions run |
-| `make test-windows` | Windows with WinFsp | Passed in the third Actions run |
+| `make test-windows` | Windows with WinFsp | Passed in the final code Actions run |
 | Xcode build job | `xcode-27` runner | Passed with Xcode 27.1 and macOS 27 SDK |
-| `make test-macos` | macOS 27, matching signed and enabled extension | Native job configured; not executed |
+| `make test-macos` | macOS 27, matching signed and enabled extension | User chose local acceptance after upgrading this Mac |
 
-The user authorized a new public GitHub repository, `xuehaonan27/fusedock`. The repository is public. [The first Actions run](https://github.com/xuehaonan27/fusedock/actions/runs/41034945547) passed Linux native FUSE, Xcode 27 compilation, Linux/macOS core tests, race tests, go-fuse library tests, and cross-builds. The initial Windows failures led to SID/DACL validation, native mountpoint preparation, and readiness fixes. [The third Actions run](https://github.com/xuehaonan27/fusedock/actions/runs/41036821159) passed all ten enabled jobs, including Windows core and native snapshot acceptance. macOS native mounting was skipped because no signed-extension host is configured. The current Mac cannot compile or run macOS 27 FSKit APIs. Cross-build success is recorded separately from native filesystem results.
+The public repository is [xuehaonan27/fusedock](https://github.com/xuehaonan27/fusedock). Code commit `7faa61f` passed all ten enabled CI jobs; the subsequent acceptance-record update changes documentation only. [The first Actions run](https://github.com/xuehaonan27/fusedock/actions/runs/41034945547) passed Linux native FUSE, Xcode 27 compilation, Linux/macOS core tests, race tests, go-fuse library tests, and cross-builds. The initial Windows failures led to SID/DACL validation, native mountpoint preparation, and readiness fixes. [The final code Actions run](https://github.com/xuehaonan27/fusedock/actions/runs/41038439790) passed all ten enabled jobs, including Windows core and native snapshot acceptance. macOS native mounting was skipped; the user chose to run it locally after upgrading this Mac to macOS 27. The current Mac cannot compile or run macOS 27 FSKit APIs. Cross-build success is recorded separately from native filesystem results.
 
 ## Open work in the same acceptance plan
 
-1. Run native filesystem tests for the Swift extension on macOS 27; Xcode 27 compilation has passed. Establish native old/new item, kernel name-cache, data-cache, and EOF behavior. DataCacheHandler implementation alone does not establish that two FSItem instances for one file ID satisfy concurrent-revision semantics.
+1. After the user upgrades this Mac, run native filesystem tests for the Swift extension on macOS 27; Xcode 27 compilation has passed. Establish native old/new item, kernel name-cache, data-cache, and EOF behavior. DataCacheHandler implementation alone does not establish that two FSItem instances for one file ID satisfy concurrent-revision semantics.
 2. Linux and Windows native contracts passed. Complete additional native inode/FORGET and path replacement coverage.
 3. Implement signed macOS peer reconnection and endpoint discovery after extension restart. The current one-use bootstrap does not recover a relaunched extension. Test transport, daemon, extension, and reauthentication recovery separately.
 4. Finish explicit forced shutdown, retry after a failed native unmount, and bounded shutdown behavior. Current errors remain visible; a failed native unmount may still leave the OS mount present.
