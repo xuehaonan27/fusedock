@@ -110,6 +110,27 @@ func TestHotWorkingSetSurvivesScan(t *testing.T) {
 	}
 	l.Release()
 }
+
+func TestPersistentHotWorkingSetSurvivesScan(t *testing.T) {
+	key := testKey("hot")
+	limit := 4 * (key.Length + headerSize)
+	c := newTestCache(t, Options{MemoryBytes: key.Length, DiskDirectory: filepath.Join(t.TempDir(), "cache"), DiskBytes: limit})
+	put(t, c, key, 1)
+	put(t, c, key, 2)
+	for i := 0; i < 100; i++ {
+		put(t, c, testKey(string(rune(i+100))), uint64(i+10))
+	}
+	lease, err := c.Acquire(context.Background(), key, true, 200, func(context.Context, []byte) error {
+		return errors.New("persistent hot entry evicted by scan")
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	lease.Release()
+	if stats := c.Stats(); stats.DiskHits == 0 || stats.DiskBytes > limit {
+		t.Fatalf("disk cache policy: %+v", stats)
+	}
+}
 func TestPersistentRestartIsolationAndCorruption(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "cache")
 	o := Options{MemoryBytes: 128, DiskDirectory: dir, DiskBytes: 4096}

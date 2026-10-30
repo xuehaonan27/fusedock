@@ -15,8 +15,8 @@ The repository contains a shared namespace, read VFS, persistent block cache, ac
 | Account store | Random AccountID and stable credential reference for new bindings; host credential storage |
 | Daemon/cache | Shared cache owner, local control API, mount restoration, memory/disk 2Q, cache administration |
 | Account broker | One-use loopback capability; secrets stay in the CLI/broker process |
-| Linux FUSE | Implemented with go-fuse; build tested, native mount requires the FUSE 3 package |
-| macOS FSKit | macOS 27 DataCacheHandler integration; Xcode 27 build and native cache acceptance pending |
+| Linux FUSE | Native snapshot/read/rename/unmount contract passed on the Actions FUSE 3 runner |
+| macOS FSKit | macOS 27 DataCacheHandler integration; Xcode 27 build passed; native cache acceptance pending |
 | Windows | WinFsp adapter implemented; native mount acceptance awaits the Windows Actions runner |
 | Google Drive | Not implemented yet; fits the same provider contract |
 | Writable mounts | Not implemented; the capability and conflict model is defined in the architecture |
@@ -45,6 +45,8 @@ In another terminal:
 ```sh
 ls /tmp/fusedock-local
 ```
+
+On Windows, WinFsp creates a directory mountpoint itself: choose an unused drive letter or a path whose parent exists and whose final directory does not yet exist.
 
 Press Ctrl-C in the mount terminal to unmount. The Linux FUSE 3 package must provide `/dev/fuse` and `fusermount3`.
 

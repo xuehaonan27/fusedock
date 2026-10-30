@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"sort"
@@ -195,17 +196,20 @@ func (s *Store) read() (Config, error) {
 	if !info.Mode().IsRegular() {
 		return empty, errors.New("account store must be a regular file")
 	}
-	if err := checkConfigPermissions(info); err != nil {
+	if err := checkConfigPermissions(file, info); err != nil {
 		return empty, err
 	}
 	if info.Size() > maxConfigSize {
 		return empty, errors.New("account store exceeds 1 MiB")
 	}
-	data, err := os.ReadFile(s.Path)
+	data, err := io.ReadAll(io.LimitReader(file, maxConfigSize+1))
 	if err != nil {
 		return empty, fmt.Errorf("read account store: %w", err)
 	}
 	defer clear(data)
+	if len(data) > maxConfigSize {
+		return empty, errors.New("account store exceeds 1 MiB")
+	}
 	var config Config
 	if err := json.Unmarshal(data, &config); err != nil {
 		return empty, errors.New("account store contains invalid JSON")

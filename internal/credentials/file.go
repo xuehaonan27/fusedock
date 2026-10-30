@@ -44,7 +44,7 @@ func Read(path string) (map[string][]byte, error) {
 	if info.Size() > maxFileBytes {
 		return nil, errors.New("credential file exceeds 64 KiB")
 	}
-	if err := checkOwnerAndMode(path, info); err != nil {
+	if err := checkOwnerAndMode(file, info); err != nil {
 		return nil, err
 	}
 	data, err := io.ReadAll(io.LimitReader(file, maxFileBytes+1))
@@ -89,6 +89,19 @@ func Read(path string) (map[string][]byte, error) {
 		return nil, errors.New("credential file contains no credentials")
 	}
 	return result, nil
+}
+
+// CheckPrivateFile verifies the opened file's owner and permissions using the
+// host's access-control model. Callers read through the same checked handle.
+func CheckPrivateFile(file *os.File) error {
+	info, err := file.Stat()
+	if err != nil {
+		return err
+	}
+	if !info.Mode().IsRegular() {
+		return errors.New("private file must be regular")
+	}
+	return checkOwnerAndMode(file, info)
 }
 
 // WritePrivate atomically replaces a key=value file in a private directory.

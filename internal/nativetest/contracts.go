@@ -72,7 +72,7 @@ func (r *read) ReadAt(ctx context.Context, b []byte, off int64) (int, error) {
 	return copy(b, r.b[off:]), nil
 }
 func (r *read) Close() error { return nil }
-func Run(t *testing.T, mount Mount) {
+func Run(t *testing.T, mount Mount, prepare ...func(string) error) {
 	t.Helper()
 	original := append([]byte("original snapshot"), bytes.Repeat([]byte("A"), 8<<20)...)
 	modified := append([]byte("modified snapshot with a new size"), bytes.Repeat([]byte("B"), 8<<20)...)
@@ -81,6 +81,11 @@ func Run(t *testing.T, mount Mount) {
 	session := vfs.New(base, 0)
 	defer session.Close()
 	point := t.TempDir()
+	for _, setup := range prepare {
+		if err := setup(point); err != nil {
+			t.Fatal(err)
+		}
+	}
 	ctx, cancel := context.WithCancel(context.Background())
 	ready := make(chan struct{})
 	done := make(chan error, 1)

@@ -24,7 +24,7 @@ credential store
 
 - The listener binds specifically to `127.0.0.1` with an ephemeral port. It does not bind a wildcard or LAN interface.
 - The capability file is created atomically with mode `0600` inside a directory requiring owner-only permissions.
-- Windows private directories receive a protected current-user DACL. Daemon control uses a local named pipe with the current-user SID; the client also verifies the server process SID. The standalone credential-file reader on Windows remains unsupported.
+- Windows private directories receive a protected current-user DACL. Daemon control uses a local named pipe with the current-user SID; the client also verifies the server process SID. Credential/configuration reads verify the opened handle’s SID/DACL, reject unprivileged grants to other users or groups, and reject multiply-linked or reparse files. SYSTEM and Administrators retain their OS privilege boundary.
 - The disk capability is bootstrap-only and can be claimed exactly once. A successful claim issues a new random 256-bit data capability that exists only in broker and extension memory.
 - Data endpoints accept only the claimed session capability. Reusing the bootstrap capability for root, list, stat, or read returns `401`.
 - `close` revokes the in-memory capability; the CLI removes the bootstrap file immediately after a successful claim and again on broker exit.

@@ -181,15 +181,16 @@ func (d *diskStore) read(k Key, dest []byte, access uint64) bool {
 	return true
 }
 func (d *diskStore) corrupt(path string) { d.metrics.Corrupt.Add(1); d.remove(path) }
-func (d *diskStore) remove(path string) {
+func (d *diskStore) remove(path string) error {
 	if err := d.root.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
-		return
+		return err
 	}
 	if old, ok := d.entries[path]; ok {
 		d.bytes -= old.size
 		delete(d.entries, path)
 		d.policy.remove(path)
 	}
+	return nil
 }
 func (d *diskStore) write(k Key, data []byte, epoch uint64, access uint64) {
 	select {
@@ -280,12 +281,13 @@ func (d *diskStore) clear(tag string, epoch uint64) error {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	d.epochs[tag] = epoch
+	var result error
 	for path := range d.entries {
 		if strings.HasPrefix(path, "entries/"+tag+"/") {
-			d.remove(path)
+			result = errors.Join(result, d.remove(path))
 		}
 	}
-	return nil
+	return result
 }
 func (d *diskStore) closeRoot() error { return errors.Join(d.root.Close(), d.lock.Close()) }
 func (d *diskStore) close() error     { <-d.ready; return d.closeRoot() }

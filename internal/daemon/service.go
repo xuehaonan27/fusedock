@@ -14,6 +14,7 @@ import (
 
 	"github.com/xuehaonan27/fusedock/internal/accounts"
 	"github.com/xuehaonan27/fusedock/internal/blockcache"
+	"github.com/xuehaonan27/fusedock/internal/credentials"
 	"github.com/xuehaonan27/fusedock/internal/mountapi"
 	"github.com/xuehaonan27/fusedock/internal/namespace"
 	"github.com/xuehaonan27/fusedock/internal/vfs"
@@ -78,6 +79,9 @@ func New(o Options) (*Service, error) {
 	}
 	if o.Mount == nil {
 		return nil, errors.New("daemon mount adapter is required")
+	}
+	if err := credentials.EnsurePrivateParent(filepath.Join(o.Directory, "mounts.json")); err != nil {
+		return nil, err
 	}
 	if o.Cache.DiskDirectory == "" {
 		o.Cache.DiskDirectory = filepath.Join(o.Directory, "cache")

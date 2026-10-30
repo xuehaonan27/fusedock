@@ -90,8 +90,8 @@ func TestCredentialFileCarriesProviderOptions(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(root, "file.txt"), []byte("data"), 0600); err != nil {
 		t.Fatal(err)
 	}
-	config := filepath.Join(t.TempDir(), "local.credentials")
-	if err := os.WriteFile(config, []byte("provider=local\nroot="+root+"\n"), 0600); err != nil {
+	config := filepath.Join(t.TempDir(), "private", "local.credentials")
+	if err := credentials.WritePrivate(config, map[string][]byte{"provider": []byte("local"), "root": []byte(root)}); err != nil {
 		t.Fatal(err)
 	}
 	registry, err := providers.Builtin()
@@ -166,8 +166,8 @@ func TestAccountAddAndUse(t *testing.T) {
 	if err := registry.Register(factory); err != nil {
 		t.Fatal(err)
 	}
-	config := filepath.Join(t.TempDir(), "fake.credentials")
-	if err := os.WriteFile(config, []byte("provider=fake\nusername=fixture\npassword=secret\nendpoint=https://example.test\n"), 0600); err != nil {
+	config := filepath.Join(t.TempDir(), "private", "fake.credentials")
+	if err := credentials.WritePrivate(config, map[string][]byte{"provider": []byte("fake"), "username": []byte("fixture"), "password": []byte("secret"), "endpoint": []byte("https://example.test")}); err != nil {
 		t.Fatal(err)
 	}
 	var stdout, stderr bytes.Buffer
@@ -281,8 +281,8 @@ func TestAccountAddUsesProviderAuthorizer(t *testing.T) {
 	if err := registry.Register(factory); err != nil {
 		t.Fatal(err)
 	}
-	config := filepath.Join(t.TempDir(), "oauth.credentials")
-	if err := os.WriteFile(config, []byte("provider=oauth\napp_key=public\nsecret_key=private\n"), 0600); err != nil {
+	config := filepath.Join(t.TempDir(), "private", "oauth.credentials")
+	if err := credentials.WritePrivate(config, map[string][]byte{"provider": []byte("oauth"), "app_key": []byte("public"), "secret_key": []byte("private")}); err != nil {
 		t.Fatal(err)
 	}
 	var stdout, stderr bytes.Buffer

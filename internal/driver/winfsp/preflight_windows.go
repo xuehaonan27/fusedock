@@ -3,6 +3,7 @@ package winfsp
 import (
 	"errors"
 	"os"
+	"path/filepath"
 	"strings"
 )
 
@@ -13,15 +14,20 @@ func Preflight(path string) error {
 		}
 		return errors.New("drive letter is already in use")
 	}
-	entries, err := os.ReadDir(path)
+	if strings.ContainsAny(path, "\x00") {
+		return errors.New("invalid mountpoint")
+	}
+	if _, err := os.Lstat(path); err == nil {
+		return errors.New("WinFsp creates its directory mountpoint; choose a path that does not exist")
+	} else if !os.IsNotExist(err) {
+		return err
+	}
+	parent, err := os.Stat(filepath.Dir(path))
 	if err != nil {
 		return err
 	}
-	if len(entries) != 0 {
-		return errors.New("mountpoint must be empty")
-	}
-	if strings.ContainsAny(path, "\x00") {
-		return errors.New("invalid mountpoint")
+	if !parent.IsDir() {
+		return errors.New("mountpoint parent must be a directory")
 	}
 	return nil
 }

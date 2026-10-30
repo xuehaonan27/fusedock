@@ -15,5 +15,5 @@ func TestWinFspSnapshotContract(t *testing.T) {
 	}
 	nativetest.Run(t, func(ctx context.Context, s provider.Session, path string, ready func()) error {
 		return platform.Mount(ctx, s, path, platform.Options{ReadOnly: true, Ready: ready})
-	})
+	}, os.Remove)
 }
