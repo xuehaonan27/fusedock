@@ -83,3 +83,48 @@ func TestCachedSessionRootUsesRootOperation(t *testing.T) {
 		t.Fatalf("Root used Stat %d times", calls)
 	}
 }
+
+type refreshSession struct {
+	fakeSession
+	started chan struct{}
+	finish  chan struct{}
+}
+
+func (s *refreshSession) List(ctx context.Context, _ provider.Object) ([]provider.Object, error) {
+	name := "new"
+	if s.listCalls.Add(1) == 1 {
+		close(s.started)
+		select {
+		case <-s.finish:
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+		name = "old"
+	}
+	return []provider.Object{{ID: name, Name: name, Kind: provider.KindFile}}, nil
+}
+
+func TestRefreshDoesNotJoinOrRepublishOlderMetadata(t *testing.T) {
+	base := &refreshSession{started: make(chan struct{}), finish: make(chan struct{})}
+	s := New(base, time.Minute)
+	defer s.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	root := provider.Object{ID: "root", Kind: provider.KindDirectory}
+	old := make(chan error, 1)
+	go func() { _, err := s.List(ctx, root); old <- err }()
+	<-base.started
+	s.Invalidate(root.ID)
+	objects, err := s.List(ctx, root)
+	if err != nil || len(objects) != 1 || objects[0].Name != "new" {
+		t.Fatalf("refresh joined stale request: %v %v", objects, err)
+	}
+	close(base.finish)
+	if err := <-old; err != nil {
+		t.Fatal(err)
+	}
+	objects, err = s.List(ctx, root)
+	if err != nil || len(objects) != 1 || objects[0].Name != "new" || base.listCalls.Load() != 2 {
+		t.Fatalf("old completion replaced refreshed cache: %v %v", objects, err)
+	}
+}

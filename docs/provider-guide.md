@@ -7,7 +7,7 @@ A provider adapts one remote service to FuseDock's small read namespace contract
 Implement `provider.Factory` and `provider.Session`:
 
 ```go
-import "github.com/xuehaonan/fusedock/pkg/provider"
+import "github.com/xuehaonan27/fusedock/pkg/provider"
 
 type Factory struct{}
 

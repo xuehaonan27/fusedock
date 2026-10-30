@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"github.com/xuehaonan27/fusedock/internal/accounts"
+	"github.com/xuehaonan27/fusedock/internal/credentials"
 	"github.com/xuehaonan27/fusedock/internal/mountapi"
 	"github.com/xuehaonan27/fusedock/internal/providers"
 	brokerclient "github.com/xuehaonan27/fusedock/internal/providers/broker"
@@ -12,6 +13,7 @@ import (
 	"github.com/zalando/go-keyring"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -194,5 +196,33 @@ func TestUnmountFailureRemainsVisible(t *testing.T) {
 	}
 	if _, ok := d.desired["busy"]; !ok {
 		t.Fatal("failed unmount discarded the saved mount")
+	}
+}
+
+func TestLegacyAccountPersistenceRequiresStableIdentity(t *testing.T) {
+	base := t.TempDir()
+	path := filepath.Join(base, "accounts", "accounts.json")
+	if err := credentials.EnsurePrivateParent(path); err != nil {
+		t.Fatal(err)
+	}
+	config := `{"version":1,"default":"old","accounts":[{"name":"old","provider":"pku","username":"fixture"}]}`
+	if err := os.WriteFile(path, []byte(config), 0600); err != nil {
+		t.Fatal(err)
+	}
+	registry, err := providers.Builtin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	d, err := New(Options{Directory: filepath.Join(base, "daemon"), Accounts: &accounts.Store{Path: path, Secrets: &secretStore{values: map[string]string{}}}, Registry: registry, Mount: func(context.Context, provider.Session, string, mountapi.Options) error {
+		t.Error("legacy persistence reached native mounting")
+		return nil
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer d.Close()
+	_, err = d.Mount(context.Background(), MountSpec{ID: "test", Account: "old", Path: filepath.Join(base, "mount"), Persistent: true})
+	if err == nil || !strings.Contains(err.Error(), "AccountID") {
+		t.Fatalf("legacy persistence returned %v", err)
 	}
 }

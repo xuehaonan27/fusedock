@@ -25,33 +25,33 @@ Host: macOS 26.5.1, arm64. Default Go: 1.27.3. Xcode: 26.6.
 
 - `make check`: formatting, `go vet`, all Go race tests, Linux/macOS/Windows CLI cross-builds passed.
 - `GOTOOLCHAIN=go1.25.0 go test ./internal/blockcache ./internal/daemon ./internal/vfs`: passed.
-- Go bridge `c-archive` build: passed before the latest documentation and CLI-only changes.
+- Go bridge `c-archive` build: passed locally and in the Xcode 27 Actions job.
 - Core snapshot sharing exercised 1, 10, 100, and 1,000 concurrent readers. Each immutable revision was fetched once in the fixture.
 - Cache tests exercised waiter cancellation, payload reservations, a hot working set mixed with scans, pinned clear, restart hits, corrupt entries, and namespace isolation.
 - Daemon fixture tests exercised authenticated control, binary data reads, renamed-account reauthentication, stable volume identity after restoration, and visible native-unmount errors.
 - The go-fuse library suite reproduced equal-StableAttr deduplication and verified distinct object allocation and distinct generations for changed revisions.
 
-These tests use fake credential stores and local HTTP/provider fixtures. Real account credentials were not read or changed. No new host service registration or app installation was performed.
+These tests use fake credential stores and local HTTP/provider fixtures. Windows runs include positive private-file reads, rejection of broad DACLs, and hard-link rejection. Real account credentials were not read or changed. No new host service registration or app installation was performed.
 
 ## Native acceptance and CI
 
-The shared native contract mounts a fixture and checks old/new content, old uncached ranges, cross-block reads, snapshot size/EOF, same-size changes, rename observation, and unmount. Platform suites opt in explicitly:
+The shared native contract mounts a fixture and checks directory enumeration, old/new content, old uncached ranges, cross-block reads, snapshot size/EOF, same-size changes, rename observation, and unmount. Platform suites opt in explicitly:
 
 | Entry | Host requirement | Current result |
 | --- | --- | --- |
 | `make test-core` | Go toolchain | Passed through the complete Go suite |
 | `make test-gofuse` | Linux or macOS; no mount | Passed |
 | `make test-linux` | Linux with FUSE 3 and `/dev/fuse` | Passed in the first Actions run |
-| `make test-windows` | Windows with WinFsp | Actions job configured; not executed |
+| `make test-windows` | Windows with WinFsp | Passed in the third Actions run |
 | Xcode build job | `xcode-27` runner | Passed with Xcode 27.1 and macOS 27 SDK |
 | `make test-macos` | macOS 27, matching signed and enabled extension | Native job configured; not executed |
 
-The user authorized a new public GitHub repository, `xuehaonan27/fusedock`. The repository is public. [The first Actions run](https://github.com/xuehaonan27/fusedock/actions/runs/41034945547) passed Linux native FUSE, Xcode 27 compilation, Linux/macOS core tests, race tests, go-fuse library tests, and cross-builds. Windows failures identified directory mountpoint preparation and missing SID/DACL credential validation; their fixes are being verified. The current Mac cannot compile or run macOS 27 FSKit APIs. Cross-build success is recorded separately from native filesystem results.
+The user authorized a new public GitHub repository, `xuehaonan27/fusedock`. The repository is public. [The first Actions run](https://github.com/xuehaonan27/fusedock/actions/runs/41034945547) passed Linux native FUSE, Xcode 27 compilation, Linux/macOS core tests, race tests, go-fuse library tests, and cross-builds. The initial Windows failures led to SID/DACL validation, native mountpoint preparation, and readiness fixes. [The third Actions run](https://github.com/xuehaonan27/fusedock/actions/runs/41036821159) passed all ten enabled jobs, including Windows core and native snapshot acceptance. macOS native mounting was skipped because no signed-extension host is configured. The current Mac cannot compile or run macOS 27 FSKit APIs. Cross-build success is recorded separately from native filesystem results.
 
 ## Open work in the same acceptance plan
 
 1. Run native filesystem tests for the Swift extension on macOS 27; Xcode 27 compilation has passed. Establish native old/new item, kernel name-cache, data-cache, and EOF behavior. DataCacheHandler implementation alone does not establish that two FSItem instances for one file ID satisfy concurrent-revision semantics.
-2. Linux native contracts passed. Finish Windows native contracts and fix failures revealed by WinFsp. Complete native inode/FORGET and path replacement coverage.
+2. Linux and Windows native contracts passed. Complete additional native inode/FORGET and path replacement coverage.
 3. Implement signed macOS peer reconnection and endpoint discovery after extension restart. The current one-use bootstrap does not recover a relaunched extension. Test transport, daemon, extension, and reauthentication recovery separately.
 4. Finish explicit forced shutdown, retry after a failed native unmount, and bounded shutdown behavior. Current errors remain visible; a failed native unmount may still leave the OS mount present.
 5. Complete accounting/admission for metadata in-flight allocations, object/node tables, reader tables, temporary files, and process overhead. Shared block payloads and request concurrency already have limits; some identity maps still grow with observed objects.
@@ -64,3 +64,7 @@ The completed code and these open items belong to the same delivery. WebDAV and 
 ## Runtime minimums
 
 Go 1.25 supplies confined `os.Root.Rename` and `os.Root.Chtimes`; see the [Go 1.25 release notes](https://go.dev/doc/go1.25). macOS 27 supplies the FSKit [DataCacheHandler](https://developer.apple.com/documentation/fskit/fsvolume/datacachehandler) and [setCacheState](https://developer.apple.com/documentation/fskit/fsvolume/setcachestate(for:cachemode:coherencytype:action:)) APIs used by the extension.
+
+## Existing accounts and persistence
+
+Mounts requesting persistent retention require a saved AccountID. A legacy account without that field returns an explicit error before credential lookup; it can still be mounted with `--persistent-cache=false`. This work does not rewrite old account records or move their credential items. New saved bindings provide stable cache identity.

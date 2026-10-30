@@ -221,6 +221,9 @@ func (d *Service) Mount(ctx context.Context, spec MountSpec) (MountStatus, error
 	if err != nil {
 		return MountStatus{}, err
 	}
+	if spec.Persistent && a.AccountID == "" {
+		return MountStatus{}, errors.New("persistent caching requires a stable AccountID; use --persistent-cache=false for this legacy account or save a new account binding")
+	}
 	spec.AccountID = a.AccountID
 	spec.Account = a.Name
 	absolute, err := filepath.Abs(spec.Path)

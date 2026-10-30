@@ -100,7 +100,9 @@ platform_linux.go  platform_darwin.go  platform_windows.go
 - [x] Move the library regression into its independent test target; verify the NodeKey allocation prevents distinct objects receiving equal StableAttr.
 - [x] Keep FSKit `supportsPersistentObjectIDs = false` until there is a durable reverse-resolvable mapping.
 - [ ] Implement native-cache/snapshot coherence and open/close/reclaim behavior in each adapter. Restore persistent FSKit IDs only with a durable mapping and lookup tests.
-- [ ] Run actual Linux, macOS, and Windows mount/read/reopen/rename-observation/unmount acceptance on their respective hosts.
+- [x] Run actual Linux and Windows directory/read/reopen/snapshot/EOF/rename-observation/unmount contracts on GitHub Actions runners. [Passing run](https://github.com/xuehaonan27/fusedock/actions/runs/41036821159).
+- [x] Build the Swift FSKit app and Go bridge using Xcode 27.1 and the macOS 27 SDK in Actions.
+- [ ] Run macOS 27 native mount/read/reopen/rename-observation/unmount acceptance on a host with the matching signed extension enabled.
 
 Acceptance: the core has no native driver dependency; platform builds select exactly their adapter; library tests do not require a native mount; each native test result identifies its OS and driver. Cross-compilation is a separate build check.
 
@@ -144,7 +146,7 @@ Acceptance: an unchanged resolved revision can reuse persisted bytes after daemo
 | FSKit persistent IDs | Declaration set to false; mount/list passed | Native identity and lifetime tests |
 | Extension termination | Mounted child returned ENOENT | Complete lifecycle recovery; distinguish connection, volume, and read recovery |
 | go-fuse duplicate StableAttr | Independent library and allocator/generation regressions pass | Native inode/FORGET verification |
-| Native Linux/Windows mounts | Shared contract and separate Actions jobs added | Run against the selected GitHub repository |
+| Native Linux/Windows mounts | Both passed real directory/read/snapshot/EOF/rename/unmount contracts in Actions | Additional inode/FORGET/replacement coverage; macOS native acceptance |
 | Baidu MD5 | 116/823 canonical values; five downloaded samples matched | Mutation, duplicates, concurrency; object-specific eligibility |
 | Finder/read latency | Preliminary CLI and small-read timings | Instrumented workloads and measured policy |
 | WebDAV | Implementation and tests deleted on 2026-10-28 | Lowest-priority independent rewrite |

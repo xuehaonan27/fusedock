@@ -112,7 +112,7 @@ func (s *Session) load(ctx context.Context, key string, fetch func(context.Conte
 		return result, nil
 	}
 	f := s.waiting[key]
-	if f == nil {
+	if f == nil || f.epoch != s.epoch {
 		fillCtx, cancel := context.WithCancel(s.ctx)
 		f = &metadataFlight{done: make(chan struct{}), cancel: cancel, epoch: s.epoch}
 		s.waiting[key] = f

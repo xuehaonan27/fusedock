@@ -17,7 +17,7 @@ The repository contains a shared namespace, read VFS, persistent block cache, ac
 | Account broker | One-use loopback capability; secrets stay in the CLI/broker process |
 | Linux FUSE | Native snapshot/read/rename/unmount contract passed on the Actions FUSE 3 runner |
 | macOS FSKit | macOS 27 DataCacheHandler integration; Xcode 27 build passed; native cache acceptance pending |
-| Windows | WinFsp adapter implemented; native mount acceptance awaits the Windows Actions runner |
+| Windows | Native WinFsp snapshot/read/rename/unmount contract passed on the Actions runner |
 | Google Drive | Not implemented yet; fits the same provider contract |
 | Writable mounts | Not implemented; the capability and conflict model is defined in the architecture |
 | Multi-account namespace | Not implemented; a session currently represents one account |
@@ -175,6 +175,8 @@ fusedock daemon unmount --id <mount>
 fusedock daemon stop
 fusedock version
 ```
+
+Persistent retention requires an account with a stable AccountID. New account bindings include one. Older saved accounts can mount with `--persistent-cache=false`; their migration remains separate backlog work. Requesting persistence for a legacy account returns an explicit error before credential access.
 
 Baidu application credentials can be imported from an owner-only bootstrap file:
 
