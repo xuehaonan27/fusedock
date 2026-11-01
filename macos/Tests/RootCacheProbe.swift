@@ -9,6 +9,8 @@ final class RootCacheProbe: FSVolume, FSVolume.Operations, FSVolume.DataCacheHan
     let child: FSItem
     let rootFirst: Bool
     let rootNoCache: Bool
+    let rootID: UInt64
+    let parentID: UInt64
     var timer: DispatchSourceTimer?
     let logger = Logger(subsystem: "dev.fusedock.root-cache-probe", category: "probe")
 
@@ -16,6 +18,8 @@ final class RootCacheProbe: FSVolume, FSVolume.Operations, FSVolume.DataCacheHan
         let config = try String(contentsOfFile: configPath, encoding: .utf8).trimmingCharacters(in: .whitespacesAndNewlines)
         rootFirst = config != "child-first"
         rootNoCache = config == "root-no-cache"
+        rootID = config == "root-id-42" ? 42 : 2
+        parentID = config == "root-parent-self" ? rootID : 1
         if rootFirst { root = FSItem(); child = FSItem() }
         else { child = FSItem(); root = FSItem() }
         super.init(volumeID: FSVolume.Identifier(uuid: UUID()), volumeName: FSFileName(string: "RootCacheProbe"))
@@ -49,7 +53,7 @@ final class RootCacheProbe: FSVolume, FSVolume.Operations, FSVolume.DataCacheHan
         for (name, item) in [("root",root), ("child",child)] {
             for action: FSVolume.KernelCacheCoherencyAction in [.push, .pushInvalidate, .invalidate, .update] {
                 let error = setCacheState(for: item, cacheMode: .readWithCache, coherencyType: self.rootNoCache && item === root ? .noCache : .readCache, action: action) as NSError?
-                logger.notice("rootFirst=\(self.rootFirst) rootNoCache=\(self.rootNoCache) item=\(name, privacy: .public) action=\(action.rawValue) domain=\(error?.domain ?? "none", privacy: .public) code=\(error?.code ?? 0)")
+                logger.notice("rootID=\(self.rootID) parentID=\(self.parentID) rootFirst=\(self.rootFirst) rootNoCache=\(self.rootNoCache) item=\(name, privacy: .public) action=\(action.rawValue) domain=\(error?.domain ?? "none", privacy: .public) code=\(error?.code ?? 0)")
             }
         }
     }
@@ -61,8 +65,8 @@ final class RootCacheProbe: FSVolume, FSVolume.Operations, FSVolume.DataCacheHan
         a.type = .directory; a.mode = 0o555; a.linkCount = 1
         a.uid = getuid(); a.gid = getgid(); a.flags = 0
         a.size = 0; a.allocSize = 0
-        a.fileID = FSItem.Identifier(rawValue: item === root ? 2 : 3)!
-        a.parentID = item === root ? .parentOfRoot : .rootDirectory
+        a.fileID = FSItem.Identifier(rawValue: item === root ? rootID : 3)!
+        a.parentID = FSItem.Identifier(rawValue: item === root ? parentID : rootID)!
         a.accessTime = timespec(); a.modifyTime = timespec(); a.changeTime = timespec(); a.birthTime = timespec()
         return a
     }
