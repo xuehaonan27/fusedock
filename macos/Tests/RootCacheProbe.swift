@@ -4,7 +4,7 @@ import FSKit
 import OSLog
 
 @available(macOS 27.0, *)
-final class RootCacheProbe: FSVolume, FSVolume.Operations, FSVolume.DataCacheHandler {
+class RootCacheProbe: FSVolume, FSVolume.Operations, FSVolume.DataCacheHandler {
     let root: FSItem
     let child: FSItem
     let rootFirst: Bool

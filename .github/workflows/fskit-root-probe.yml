@@ -5,7 +5,7 @@ on:
       variant:
         type: choice
         default: standalone
-        options: [standalone, root-no-cache]
+        options: [standalone, root-no-cache, read-content, native-trace]
         description: Standalone cache calls or native adapter with an uncached root
 permissions:
   contents: read
@@ -24,14 +24,23 @@ jobs:
           python3 - <<'PY'
           from pathlib import Path
           import os, shutil
-          if os.environ['PROBE_VARIANT'] == 'standalone':
+          variant = os.environ['PROBE_VARIANT']
+          if variant in ('standalone', 'read-content'):
               shutil.copy('macos/Tests/RootCacheProbe.swift', 'macos/FSKit/FuseDockFSKit/')
+              volume = 'RootCacheProbe'
+              if variant == 'read-content':
+                  shutil.copy('macos/Tests/ReadCacheProbe.swift', 'macos/FSKit/FuseDockFSKit/')
+                  volume = 'ReadCacheProbe'
               path = Path('macos/FSKit/FuseDockFSKit/FuseDockFileSystem.swift')
               source = path.read_text().replace('let volume: FuseDockFSVolume', 'let volume: FSVolume')
-              source = source.replace('volume = try FuseDockCachedFSVolume(configPath: configPath)', 'volume = try RootCacheProbe(configPath: configPath)')
-          else:
+              source = source.replace('volume = try FuseDockCachedFSVolume(configPath: configPath)', f'volume = try {volume}(configPath: configPath)')
+          elif variant == 'root-no-cache':
               path = Path('macos/FSKit/FuseDockFSKit/FuseDockCachedFSVolume.swift')
               source = path.read_text().replace('cacheMode == .none ? .noCache : .readCache', 'cacheMode == .none || item === rootItem ? .noCache : .readCache')
+          else:
+              path = Path('macos/FSKit/FuseDockFSKit/FuseDockCachedFSVolume.swift')
+              source = path.read_text().replace('let previous = itemQueue.sync { items[object.id] }', 'Logger.fusedock.notice("trace event=lookup node=\\(object.nodeID) revision=\\(object.contentVersion, privacy: .public)")\n        let previous = itemQueue.sync { items[object.id] }')
+              source = source.replace('let coherency: FSVolume.KernelCacheCoherencyType', 'if let file = item as? FuseDockFSItem { Logger.fusedock.notice("trace event=open-or-upgrade node=\\(file.inode) revision=\\(file.object.contentVersion, privacy: .public)") }\n        let coherency: FSVolume.KernelCacheCoherencyType')
           path.write_text(source)
           PY
       - run: make macos-bridge
