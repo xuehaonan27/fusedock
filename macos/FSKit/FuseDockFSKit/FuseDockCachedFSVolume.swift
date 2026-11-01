@@ -28,8 +28,8 @@ final class FuseDockCachedFSVolume: FuseDockFSVolume, FSVolume.DataCacheHandler 
         // This does not poll providers or discard version-bound file blocks.
         let directories = itemQueue.sync { items.values.filter { $0.object.isDirectory } }
         for directory in directories {
-            if let error = setCacheState(for: directory, cacheMode: .none,
-                                        coherencyType: .noCache, action: .invalidate) {
+            if let error = setCacheState(for: directory, cacheMode: .readWithCache,
+                                        coherencyType: .readCache, action: .invalidate) {
                 Logger.fusedock.error("Directory cache expiry failed: \(error.localizedDescription, privacy: .public)")
             }
         }
