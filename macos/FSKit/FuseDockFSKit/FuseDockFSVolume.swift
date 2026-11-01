@@ -36,23 +36,21 @@ class FuseDockFSVolume: FSVolume {
         }
     }
 
-    func openRead(_ item: FuseDockFSItem, preservingVersion: Bool = false) throws {
+    func openRead(_ item: FuseDockFSItem) throws {
         item.readLock.lock()
         defer { item.readLock.unlock() }
         if item.readHandle != 0 { return }
         let opened = try bridge.openRead(object: item.object)
-        // macOS 26 cannot invalidate bytes already cached for this FSItem.
-        // A provider without revision reads must report a changed object,
-        // rather than attach newer bytes to the existing kernel cache.
+        // Every FSItem owns one observed version for its lifetime. Reopening
+        // a provider handle must preserve both that content and its attributes.
         let sameContent = item.object.contentVersion.isEmpty
             ? opened.snapshot.version == item.object.version
             : opened.snapshot.contentVersion == item.object.contentVersion
-        if preservingVersion && (!sameContent || opened.snapshot.size != item.object.size) {
+        if !sameContent || opened.snapshot.size != item.object.size {
             bridge.closeRead(handle: opened.handle)
             throw POSIXError(.ESTALE)
         }
         item.readHandle = opened.handle
-        if !preservingVersion { item.object = opened.snapshot }
     }
 
     func closeRead(_ item: FuseDockFSItem) {

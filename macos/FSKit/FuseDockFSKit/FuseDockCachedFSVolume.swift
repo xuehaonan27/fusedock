@@ -80,14 +80,15 @@ final class FuseDockCachedFSVolume: FuseDockFSVolume, FSVolume.Handler, FSVolume
     ) {
         guard !modes.contains(.write) else { reply(nil, POSIXError(.EROFS)); return }
         guard let fsItem = item as? FuseDockFSItem else { reply(nil, POSIXError(.EINVAL)); return }
+        let coherency: FSVolume.KernelCacheCoherencyType = cacheMode == .none ? .noCache : .readCache
         if fsItem.object.isDirectory {
-            reply(FSOpenItemResult(grantedCoherency: .noCache), nil)
+            Logger.fusedock.error("cache-probe directory open mode=\(cacheMode.rawValue) granted=\(coherency.rawValue)")
+            reply(FSOpenItemResult(grantedCoherency: coherency), nil)
             return
         }
         DispatchQueue.global(qos: .userInitiated).async {
             do {
                 try self.openRead(fsItem)
-                let coherency: FSVolume.KernelCacheCoherencyType = cacheMode == .none ? .noCache : .readCache
                 reply(FSOpenItemResult(grantedCoherency: coherency), nil)
             } catch {
                 reply(nil, Self.posixError(for: error))

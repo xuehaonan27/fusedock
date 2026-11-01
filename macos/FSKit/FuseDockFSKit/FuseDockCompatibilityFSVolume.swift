@@ -14,7 +14,7 @@ final class FuseDockCompatibilityFSVolume: FuseDockFSVolume, FSVolume.Operations
         if fsItem.object.isDirectory { replyHandler(nil); return }
         DispatchQueue.global(qos: .userInitiated).async {
             do {
-                try self.openRead(fsItem, preservingVersion: true)
+                try self.openRead(fsItem)
                 replyHandler(nil)
             } catch {
                 replyHandler(Self.posixError(for: error))
