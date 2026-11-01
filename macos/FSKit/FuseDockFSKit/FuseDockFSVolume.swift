@@ -1,9 +1,7 @@
 import Foundation
 import FSKit
 
-class FuseDockFSVolume: FSVolume,
-                             FSVolume.Operations,
-                             FSVolume.ReadWriteOperations {
+class FuseDockFSVolume: FSVolume {
     let bridge: FuseDockBridge
     let rootItem: FuseDockFSItem
     var items: [String: FuseDockFSItem] = [:]

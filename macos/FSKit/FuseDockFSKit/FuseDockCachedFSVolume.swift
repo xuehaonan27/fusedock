@@ -4,7 +4,7 @@ import FSKit
 import OSLog
 
 @available(macOS 27.0, *)
-final class FuseDockCachedFSVolume: FuseDockFSVolume, FSVolume.DataCacheHandler {
+final class FuseDockCachedFSVolume: FuseDockFSVolume, FSVolume.Handler, FSVolume.ReadWriteHandler, FSVolume.DataCacheHandler {
     private var cacheTimer: DispatchSourceTimer?
 
     override func startCacheMaintenance() {

@@ -3,7 +3,7 @@ import FSKit
 
 // macOS 26 keeps each file's observed version for the FSItem lifetime. The
 // kernel owns that lifetime; unmount/remount is the explicit refresh boundary.
-final class FuseDockCompatibilityFSVolume: FuseDockFSVolume, FSVolume.OpenCloseOperations {
+final class FuseDockCompatibilityFSVolume: FuseDockFSVolume, FSVolume.Operations, FSVolume.ReadWriteOperations, FSVolume.OpenCloseOperations {
     func openItem(
         _ item: FSItem,
         modes: FSVolume.OpenModes,

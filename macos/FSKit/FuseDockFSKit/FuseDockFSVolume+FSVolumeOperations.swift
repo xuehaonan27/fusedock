@@ -251,7 +251,7 @@ extension FuseDockFSVolume {
         replyHandler(0, POSIXError(.EROFS))
     }
 
-    private func attributes(for object: FuseDockObject, desired: FSItem.GetAttributesRequest) -> FSItem.Attributes {
+    func attributes(for object: FuseDockObject, desired: FSItem.GetAttributesRequest) -> FSItem.Attributes {
         let attrs = FSItem.Attributes()
         if desired.isAttributeWanted(.uid) { attrs.uid = getuid() }
         if desired.isAttributeWanted(.gid) { attrs.gid = getgid() }
@@ -267,7 +267,10 @@ extension FuseDockFSVolume {
             attrs.parentID = FSItem.Identifier(rawValue: parent) ?? .invalid
         }
         if desired.isAttributeWanted(.type) { attrs.type = object.isDirectory ? .directory : .file }
-        if object.modified > 0 {
+        if desired.isAttributeWanted(.flags) { attrs.flags = 0 }
+        if desired.isAttributeWanted(.supportsLimitedXAttrs) { attrs.supportsLimitedXAttrs = false }
+        if desired.isAttributeWanted(.inhibitKernelOffloadedIO) { attrs.inhibitKernelOffloadedIO = true }
+        do {
             let timestamp = timespec(
                 tv_sec: Int(object.modified / 1_000_000_000),
                 tv_nsec: Int(object.modified % 1_000_000_000)
