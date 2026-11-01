@@ -11,11 +11,13 @@ final class RootCacheProbe: FSVolume, FSVolume.Operations, FSVolume.DataCacheHan
     let rootNoCache: Bool
     let rootID: UInt64
     let parentID: UInt64
+    let probeID: String
     var timer: DispatchSourceTimer?
     let logger = Logger(subsystem: "dev.fusedock.root-cache-probe", category: "probe")
 
     init(configPath: String) throws {
         let resource = URL(fileURLWithPath: configPath)
+        probeID = resource.lastPathComponent
         let source = try resource.resourceValues(forKeys: [.isDirectoryKey]).isDirectory == true ? resource.appendingPathComponent("config") : resource
         let config = try String(contentsOf: source, encoding: .utf8).trimmingCharacters(in: .whitespacesAndNewlines)
         rootFirst = config != "child-first"
@@ -55,7 +57,7 @@ final class RootCacheProbe: FSVolume, FSVolume.Operations, FSVolume.DataCacheHan
         for (name, item) in [("root",root), ("child",child)] {
             for action: FSVolume.KernelCacheCoherencyAction in [.push, .pushInvalidate, .invalidate, .update] {
                 let error = setCacheState(for: item, cacheMode: .readWithCache, coherencyType: self.rootNoCache && item === root ? .noCache : .readCache, action: action) as NSError?
-                logger.notice("rootID=\(self.rootID) parentID=\(self.parentID) rootFirst=\(self.rootFirst) rootNoCache=\(self.rootNoCache) item=\(name, privacy: .public) action=\(action.rawValue) domain=\(error?.domain ?? "none", privacy: .public) code=\(error?.code ?? 0)")
+                logger.notice("probe=\(self.probeID, privacy: .public) rootID=\(self.rootID) parentID=\(self.parentID) rootFirst=\(self.rootFirst) rootNoCache=\(self.rootNoCache) item=\(name, privacy: .public) action=\(action.rawValue) domain=\(error?.domain ?? "none", privacy: .public) code=\(error?.code ?? 0)")
             }
         }
     }

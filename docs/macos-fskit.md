@@ -105,7 +105,7 @@ The NFS bridge remains a future fallback for systems where FSKit or extension de
 - The FSKit extension is read-only.
 - CAPTCHA/OTP prompts are not yet connected to the host application.
 - The daemon has launchd service registration and same-user UDS control. Signed peer authentication and automatic extension reconnection are pending.
-- On macOS 27.2, root-directory cache invalidation returns `NSOSStatusErrorDomain -536870206`, and root-level reopens can return stale content. The full native contract remains failing. The same snapshot and rename contract passes in subdirectories; see [the detailed results](foundation-status.md#macos-27-native-findings). macOS 26 has a separate native remount-refresh contract.
+- On macOS 27.2, root-directory cache invalidation returns `NSOSStatusErrorDomain -536870206`, and root-level reopens can return stale content. A standalone Swift volume reproduces the failure; the kernel reports that the root handle has no node in the cache-state lookup table. The full native contract remains failing. The same snapshot and rename contract passes in subdirectories; see [the reproduction and root-cause analysis](fskit-root-cache.md). macOS 26 has a separate native remount-refresh contract.
 - The legacy direct credential-file path remains as a fallback, but it is read-only and does not persist a refresh session.
 - The extension requires local signing and the one-time Filesystem Extension toggle.
 - The current implementation is a development build; distribution needs an app bundle, notarization, and a release workflow.
