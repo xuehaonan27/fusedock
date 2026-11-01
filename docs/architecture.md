@@ -33,7 +33,7 @@ The current packages are:
 | `internal/platform` | Compile-time adapter selection and host service registration |
 | `internal/driver/gofuse` | Reusable go-fuse node/handle translation |
 | `internal/driver/linux` | Linux mount and kernel integration |
-| `internal/driver/fskit` | macOS 27 FSKit mount orchestration |
+| `internal/driver/fskit` | macOS 26+ FSKit mount orchestration |
 | `internal/driver/winfsp` | Windows WinFsp callbacks and mount lifecycle |
 | `internal/credentials` | Owner-only credential/configuration file parser |
 | `internal/accounts` | Account metadata, OS credential storage, default selection, and session-state persistence |
@@ -78,7 +78,7 @@ The kernel can issue reads after the handle's original open request has returned
 
 The target contract retains immutable read snapshots as a deliberate filesystem consistency model. Selecting a snapshot fixes the handle's content version and size until close/reclaim. A later open can select a refreshed revision. Rename changes a path, while replacement at the same path resolves a different object. A configured mount scope is resolved on each mount and held as an object during that mount.
 
-Every native adapter must preserve these semantics through its own handle/item model and data caches. Concurrent revisions of one object, snapshot attributes, EOF, reconnect, close, and native invalidation are part of acceptance. Normal platform caching is the design path; direct I/O is not a prerequisite. FSKit now uses opaque read handles with explicit close/reclaim. Its macOS 27 cache lifecycle implementation awaits native verification.
+Every native adapter must preserve these semantics through its own handle/item model and data caches. Concurrent revisions of one object, snapshot attributes, EOF, reconnect, close, and native invalidation are part of acceptance. Normal platform caching is the design path; direct I/O is not a prerequisite. FSKit now uses opaque read handles with explicit close/reclaim. Its macOS 27 cache lifecycle implementation awaits native verification. The macOS 26 compatibility contract selects a file version for the kernel item lifetime: close/reopen retains that version for a revision-capable provider, and remounting refreshes the view. A current-content-only provider reports ESTALE if a reopen would attach a changed version to an existing kernel item. This compatibility contract has separate native acceptance.
 
 Resource accounting covers retained blocks, fill/IPC buffers, metadata, and node/reader tables. The target policy is byte-budgeted 2Q with bounded ghost history, correlated-read accounting, and adaptive bounded read-ahead. Provider fetch size and persistent block size are independent controls. Core counters measure network bytes, first-byte delay, requests, and retained/in-flight resources.
 
@@ -162,4 +162,4 @@ The sidecar protocol is not part of this release. It must preserve stream cancel
 
 ## Runtime and verification requirements
 
-Go 1.25 is the minimum toolchain because persistent storage uses `os.Root.Rename` and `os.Root.Chtimes` for confined publication and recency updates. The native macOS host requires macOS 27 and Xcode 27. The Go bridge can be built on the current macOS 26 machine; its successful build does not establish that the Swift FSKit extension compiles against the new SDK. See [foundation status](foundation-status.md) for observed results.
+Go 1.25 is the minimum toolchain because persistent storage uses `os.Root.Rename` and `os.Root.Chtimes` for confined publication and recency updates. The native macOS host requires macOS 26 and Xcode 26 or newer. macOS 26 uses a separate FSKit OpenCloseOperations lifecycle, retaining each kernel item's observed version and refreshing the mounted view by unmount/remount. Xcode 27 builds also include a runtime-selected DataCacheHandler lifecycle with explicit kernel invalidation on macOS 27. Both implementations share the broker, namespace, VFS and block cache. The macOS 26 native contract has passed locally; macOS 27 native acceptance awaits a host upgrade. See [foundation status](foundation-status.md) for observed results.

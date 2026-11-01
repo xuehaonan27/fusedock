@@ -26,6 +26,8 @@ The user authorized GitHub Actions runners and the public repository `xuehaonan2
 
 Acceptance: application-visible bytes and attributes follow the selected read contract through provider, daemon, adapter, and native caches; a reopen observes refreshed content; closed reads release their resources. Snapshot semantics are retained as a deliberate filesystem design, rather than inferred from what generic `open()` guarantees.
 
+macOS 26 compatibility contract: the kernel item lifetime fixes the observed file version. Reopening that item retains its version for revision-capable providers; a current-content provider reports `ESTALE` if the opened version differs. Refreshing the mounted view requires unmount, daemon metadata refresh, and mount. The native compatibility suite checks this behavior separately from macOS 27 active invalidation and concurrent-revision acceptance.
+
 ## Account identity and namespace
 
 - [x] Give each new saved binding an opaque random `AccountID`, independent of its alias, credentials, and mount path.

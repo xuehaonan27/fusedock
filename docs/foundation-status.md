@@ -45,11 +45,13 @@ The shared native contract mounts a fixture and checks directory enumeration, ol
 | `make test-gofuse` | Linux or macOS; no mount | Passed |
 | `make test-linux` | Linux with FUSE 3 and `/dev/fuse` | Passed in the first Actions run |
 | `make test-windows` | Windows with WinFsp | Passed in the final code Actions run |
-| Xcode build jobs | `macos-26` and `xcode-27` runners | Separate SDK builds and compile-condition checks configured |
+| Xcode build jobs | `macos-26` and `xcode-27` runners | Both builds and SDK compile-condition checks passed |
 | `make test-macos` | macOS 26, matching signed and enabled extension | Remount-refresh native contract passed locally |
 | `make test-macos` | macOS 27, matching signed and enabled extension | Active-invalidation native contract awaits local OS upgrade |
 
 The public repository is [xuehaonan27/fusedock](https://github.com/xuehaonan27/fusedock). Code commit `7faa61f` passed all ten enabled CI jobs; the subsequent acceptance-record update changes documentation only. [The first Actions run](https://github.com/xuehaonan27/fusedock/actions/runs/41034945547) passed Linux native FUSE, Xcode 27 compilation, Linux/macOS core tests, race tests, go-fuse library tests, and cross-builds. The initial Windows failures led to SID/DACL validation, native mountpoint preparation, and readiness fixes. [The final code Actions run](https://github.com/xuehaonan27/fusedock/actions/runs/41038439790) passed all ten enabled jobs, including Windows core and native snapshot acceptance. That run skipped macOS native mounting. The subsequent macOS 26 compatibility contract has now passed locally; the macOS 27 contract still awaits a local OS upgrade. The SDK 26 build excludes SDK 27 symbols. Cross-build success is recorded separately from native filesystem results.
+
+The macOS 26 compatibility change at `cc201db` passed [all eleven enabled CI jobs](https://github.com/xuehaonan27/fusedock/actions/runs/41293998761), including both Xcode SDK builds, Linux and Windows native mounts, and all core/race/cross-build jobs. The optional self-hosted macOS job was skipped; the macOS 26 native contract was executed locally against the signed installed extension.
 
 ## Open work in the same acceptance plan
 
