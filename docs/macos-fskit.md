@@ -36,7 +36,7 @@ No macFUSE installation is needed.
 | --- | --- | --- |
 | Xcode 26 build on macOS 26+ | `OpenCloseOperations` | Remount to refresh remotely changed files |
 | Xcode 27+ build on macOS 26 | `OpenCloseOperations` | Remount to refresh remotely changed files |
-| Xcode 27+ build on macOS 27+ | `DataCacheHandler` | Explicit kernel data/attribute invalidation; full native acceptance pending |
+| Xcode 27+ build on macOS 27+ | `Handler` / `ReadWriteHandler` / `DataCacheHandler` | Subdirectory snapshot contract passed on 27.2; root-level remote changes require remount because root cache invalidation fails |
 
 Both paths use the same broker, provider contracts, namespace and block cache. They use normal kernel buffering. The compatibility path pins a file's observed metadata and content version for its `FSItem` lifetime. For providers with revision reads, reopening that item reads the same revision. Closing the last reader releases the provider handle; reclaim releases the item. A provider that cannot reopen the observed revision reports `ESTALE` when the newly opened metadata differs. The provider's read capabilities still determine whether its bytes have an immutable snapshot guarantee.
 
@@ -54,9 +54,15 @@ open "$HOME/Applications/FuseDock.app"
 
 The build phase compiles the Go bridge as a Darwin `c-archive`, signs the application and extension, and embeds the FSKit module entitlement. `make macos-fskit` uses automatic provisioning; it may update the developer profile in Xcode. `make macos-install` copies the result to `~/Applications/FuseDock.app` and removes stale PluginKit registrations left by Xcode's DerivedData builds. Rerun it after rebuilding so the system Settings list contains one FuseDock entry.
 
-In the app, click **Open Login Items & Extensions**, then enable **FuseDock** under **File System Extensions**. The extension can be disabled later from the same panel. This approval is a macOS user-security step and cannot be safely bypassed by the build system.
+In the app, click **Open File System Extensions**, switch the extension list to **By Category**, then open **File System Extensions** and enable **FuseDock**. The extension can be disabled later from the same panel. This approval is a macOS user-security step and cannot be safely bypassed by the build system.
 
-If the toggle appears unresponsive after repeated local development builds, quit and reopen System Settings first. For a development install, `make macos-enable` repairs stale test module IDs in the user-level FSKit state, backs up the previous state under `~/.config/fusedock`, and restarts `fskit_agent`. Release builds should use the System Settings toggle and should not ship this repair path as a silent installation step.
+If the toggle ignores clicks in **By Application**, use **By Category → File System Extensions**. These views use different Apple components; the application view has a reported FSKit authorization bug ([maintainer investigation](https://github.com/macfuse/macfuse/issues/1194)). If the category view is also unresponsive after repeated local development builds, quit and reopen System Settings first. For a development install, `make macos-enable` repairs stale test module IDs in the user-level FSKit state, backs up the previous state under `~/.config/fusedock`, and restarts `fskit_agent`. Release builds should use the System Settings toggle and should not ship this repair path as a silent installation step.
+
+## CI builds when local Xcode is older
+
+The CI `macos-build` jobs retain unsigned app bundles for seven days as `FuseDock-unsigned-macos-26` and `FuseDock-unsigned-xcode-27`. The Xcode 27 artifact contains both implementations. Upgrading macOS does not change the selected local Xcode or the installed app binary.
+
+For local acceptance, download the artifact from the desired commit, sign its nested libraries, extension and host app with the local Apple Development identity, and embed the matching FSKit provisioning profile. Keep the app and extension bundle identifiers and entitlements consistent with that profile. Run `scripts/install-macos-fskit.sh <signed-app-path>` after signing. The installer verifies the source signature before replacing the installed app. Signing keys and provisioning profiles stay on the local host.
 
 ## Account broker
 
@@ -99,7 +105,7 @@ The NFS bridge remains a future fallback for systems where FSKit or extension de
 - The FSKit extension is read-only.
 - CAPTCHA/OTP prompts are not yet connected to the host application.
 - The daemon has launchd service registration and same-user UDS control. Signed peer authentication and automatic extension reconnection are pending.
-- The macOS 27 active-invalidation contract still needs native acceptance on a macOS 27 host. macOS 26 has a separate native remount-refresh contract.
+- On macOS 27.2, root-directory cache invalidation returns `NSOSStatusErrorDomain -536870206`, and root-level reopens can return stale content. The full native contract remains failing. The same snapshot and rename contract passes in subdirectories; see [the detailed results](foundation-status.md#macos-27-native-findings). macOS 26 has a separate native remount-refresh contract.
 - The legacy direct credential-file path remains as a fallback, but it is read-only and does not persist a refresh session.
 - The extension requires local signing and the one-time Filesystem Extension toggle.
 - The current implementation is a development build; distribution needs an app bundle, notarization, and a release workflow.
@@ -120,7 +126,7 @@ bin/fusedock daemon stop
 
 The example supports existing account records without an AccountID. For a new binding with an AccountID, omit `--persistent-cache=false` to retain eligible blocks on disk.
 
-To refresh remote changes on macOS 26, close files opened from the mount, then run:
+To refresh the whole mounted view on macOS 26, or refresh root-level remote changes affected by the macOS 27.2 issue, close files opened from the mount, then run:
 
 ```sh
 bin/fusedock daemon unmount --id pku
@@ -131,6 +137,6 @@ bin/fusedock daemon mount --id pku --account pku --mountpoint "$HOME/FuseDockPKU
 
 `daemon install` registers the user LaunchAgent for login and failure recovery. `daemon uninstall` removes the registration. These commands are explicit service operations. A normal `daemon start` does not install a login agent.
 
-Run `make test-macos` with the matching signed extension installed. On macOS 26 it runs directory/read/reopen/EOF/read-only/remount-refresh acceptance; on macOS 27 it runs the active-invalidation snapshot contract. Each suite reports the other OS contract as skipped.
+Run `make test-macos` with the matching signed extension installed. On macOS 26 it runs directory/read/reopen/EOF/read-only/remount-refresh acceptance; on macOS 27 it runs the active-invalidation snapshot contract in both the root and a subdirectory. Each suite reports the other OS contract as skipped.
 
 See Apple's [OpenCloseOperations documentation](https://developer.apple.com/documentation/fskit/fsvolume/opencloseoperations), [DataCacheHandler documentation](https://developer.apple.com/documentation/fskit/fsvolume/datacachehandler) and [setCacheState documentation](https://developer.apple.com/documentation/fskit/fsvolume/setcachestate(for:cachemode:coherencytype:action:)). Cache state changes run outside module locks because the kernel can reenter the extension during the call.

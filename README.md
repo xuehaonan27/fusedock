@@ -192,7 +192,7 @@ Provider-specific configuration uses repeatable `--option key=value`. Credential
 
 ## macOS FSKit
 
-FuseDock uses Apple's native FSKit extension on macOS 26 and newer. On macOS 26, `OpenCloseOperations` manages readers and each kernel item retains its observed file version; unmount and mount again to refresh remotely changed files. On macOS 27, an Xcode 27 build selects `DataCacheHandler` for cache negotiation and `setCacheState` for explicit data invalidation. Native macOS 27 verification must establish that old and new open revisions retain separate bytes and attributes. The Swift extension owns the FSKit object model; a Go `c-archive` provides the same provider and VFS core used by Linux and the CLI.
+FuseDock uses Apple's native FSKit extension on macOS 26 and newer. On macOS 26, `OpenCloseOperations` manages readers and each kernel item retains its observed file version; unmount and mount again to refresh remotely changed files. On macOS 27, an Xcode 27 build selects `DataCacheHandler` for cache negotiation and `setCacheState` for explicit data invalidation. On macOS 27.2, native snapshot, same-size change and rename tests pass in subdirectories; the root-directory reopen test fails because its cache invalidation returns an error. Remount to refresh remotely changed files directly under the mounted root. See [the acceptance record](docs/foundation-status.md). The Swift extension owns the FSKit object model; a Go `c-archive` provides the same provider and VFS core used by Linux and the CLI.
 
 ```sh
 DEVELOPMENT_TEAM=YOUR_TEAM_ID make macos-install
@@ -201,7 +201,7 @@ open "$HOME/Applications/FuseDock.app"
 
 `macos-install` also unregisters stale FSKit extensions created by Xcode's temporary build directories, so only the installed FuseDock appears under File System Extensions.
 
-If macOS leaves that one toggle unresponsive after several development installs, quit System Settings and rerun `make macos-enable`. It backs up and repairs the per-user FSKit state before restarting the FSKit agent.
+Enable the module using **By Category → File System Extensions** in System Settings. The **By Application** view has a reported FSKit toggle bug. If the category view remains unresponsive after several development installs, the explicit development helper is `make macos-enable`. It backs up and repairs the per-user FSKit state before restarting the FSKit agent.
 
 Enable FuseDock under **System Settings → General → Login Items & Extensions → File System Extensions**. Start the broker in one terminal:
 
