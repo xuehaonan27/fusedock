@@ -55,7 +55,7 @@ The public repository is [xuehaonan27/fusedock](https://github.com/xuehaonan27/f
 
 The macOS 26 compatibility change at `cc201db` passed [all eleven enabled CI jobs](https://github.com/xuehaonan27/fusedock/actions/runs/41293998761), including both Xcode SDK builds, Linux and Windows native mounts, and all core/race/cross-build jobs. The optional self-hosted macOS job was skipped; the macOS 26 native contract was executed locally against the signed installed extension.
 
-The SDK 27 artifact and source for `c62fcdc` passed [all eleven enabled CI jobs](https://github.com/xuehaonan27/fusedock/actions/runs/41307767576). Local Go race checks for the FSKit driver, broker, VFS, namespace and daemon also passed after the OS upgrade. macOS native mounting is a separate local check, not covered by those eleven jobs.
+The installed SDK 27 artifact and source for `981396a` passed [all eleven enabled CI jobs](https://github.com/xuehaonan27/fusedock/actions/runs/41308754383). Local Go race checks for the FSKit driver, broker, VFS, namespace and daemon also passed after the OS upgrade. macOS native mounting is a separate local check, not covered by those eleven jobs.
 
 ## macOS 27 native findings
 
@@ -63,7 +63,8 @@ The user enabled the installed module through **By Category → File System Exte
 
 | Local native check | Observed result on macOS 27.2 |
 | --- | --- |
-| Root and nested directory listing, nested file read, write rejection, unmount | Passed |
+| Root and nested directory listing, file reads, write rejection, unmount | Passed |
+| Remount after changing root-level and nested file contents | Passed |
 | Nested file reopen after remote content/size change | Passed |
 | Old descriptor cached/uncached/cross-block reads, size and EOF after new revision opens | Passed in the nested contract |
 | Nested same-size replacement and remote rename | Passed |
@@ -72,7 +73,7 @@ The user enabled the installed module through **By Category → File System Exte
 
 The macOS 27 adapter now uses `FSVolume.Handler` and `ReadWriteHandler`, supplying each result class's required attributes, alongside `DataCacheHandler`. Directory name-cache expiration uses the mount's `EntryTTL` and invokes `setCacheState(..., action: .invalidate)` outside module locks. Files retain their original read snapshot and attributes for the lifetime of the item.
 
-A temporary native probe tried five cache-mode/coherency pairs on ordinary files, a nested directory and the root directory. Files and the nested directory returned success for every pair; the root returned `NSOSStatusErrorDomain -536870206` (`0xe00002c2`, `kIOReturnBadArgument`) for every pair. The framework logged `setCacheStateWithLiveFH failed`. The probe was removed; the native regression tests retain separate root and nested cases. This observation identifies the failing call in this implementation; it does not establish an Apple framework defect.
+A temporary native probe tried five cache-mode/coherency pairs on ordinary files, a nested directory and the root directory. Files and the nested directory returned success for every pair; the root returned `NSOSStatusErrorDomain -536870206` (`0xe00002c2`, `kIOReturnBadArgument`) for every pair. The framework logged `setCacheStateWithLiveFH failed`. The probe was removed; the final installed artifact reproduces the same root failure and passes the nested contract. Its log confirms `root=true node=2`: the failing item is the activation root instance. The native regression tests retain separate root and nested cases. This observation identifies the failing call in this implementation; it does not establish an Apple framework defect.
 
 Apple documents that [directory invalidation purges its name cache](https://developer.apple.com/documentation/fskit/fsvolume/kernelcachecoherencyaction/invalidate). The unresolved root result prevents claiming that guarantee for the whole mounted tree. Remounting refreshes the view. The next investigation is a minimal root-vs-child FSKit reproduction that isolates framework item registration from the broker and provider.
 
