@@ -1,2 +1,8 @@
 // FuseDock keeps stable identifiers across builds. The development team is a
 // signing property; it does not belong in the application or extension ID.
+
+// Xcode 26 builds the compatibility implementation. Xcode 27+ includes both
+// implementations; runtime availability selects the supported lifecycle.
+FUSEDOCK_CACHE_API = FUSEDOCK_FSKIT27
+FUSEDOCK_CACHE_API[sdk=macosx26*] =
+SWIFT_ACTIVE_COMPILATION_CONDITIONS = $(inherited) $(FUSEDOCK_CACHE_API)

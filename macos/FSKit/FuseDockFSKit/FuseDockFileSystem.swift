@@ -48,7 +48,16 @@ final class FuseDockFileSystem: FSUnaryFileSystem & FSUnaryFileSystemOperations 
         let configPath = pathResource.url.path
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             do {
-                let volume = try FuseDockFSVolume(configPath: configPath)
+                let volume: FuseDockFSVolume
+                #if FUSEDOCK_FSKIT27
+                if #available(macOS 27.0, *) {
+                    volume = try FuseDockCachedFSVolume(configPath: configPath)
+                } else {
+                    volume = try FuseDockCompatibilityFSVolume(configPath: configPath)
+                }
+                #else
+                volume = try FuseDockCompatibilityFSVolume(configPath: configPath)
+                #endif
                 self?.resource = pathResource
                 self?.containerStatus = .ready
                 replyHandler(volume, nil)

@@ -16,7 +16,7 @@ The repository contains a shared namespace, read VFS, persistent block cache, ac
 | Daemon/cache | Shared cache owner, local control API, mount restoration, memory/disk 2Q, cache administration |
 | Account broker | One-use loopback capability; secrets stay in the CLI/broker process |
 | Linux FUSE | Native snapshot/read/rename/unmount contract passed on the Actions FUSE 3 runner |
-| macOS FSKit | macOS 27 DataCacheHandler integration; Xcode 27 build passed; native cache acceptance pending |
+| macOS FSKit | macOS 26 compatibility lifecycle; macOS 27 cache lifecycle; see [platform acceptance](docs/foundation-status.md) |
 | Windows | Native WinFsp snapshot/read/rename/unmount contract passed on the Actions runner |
 | Google Drive | Not implemented yet; fits the same provider contract |
 | Writable mounts | Not implemented; the capability and conflict model is defined in the architecture |
@@ -24,7 +24,7 @@ The repository contains a shared namespace, read VFS, persistent block cache, ac
 
 ## Quick start
 
-Go 1.25 or newer is required. The cache uses root-relative rename and timestamp APIs added in Go 1.25. Building the FSKit application requires macOS 27 and Xcode 27.
+Go 1.25 or newer is required. The cache uses root-relative rename and timestamp APIs added in Go 1.25. Building the FSKit application requires Xcode 26 or newer; the application runs on macOS 26 or newer. Xcode 27 builds include both OS implementations.
 
 ```sh
 go build -o bin/fusedock ./cmd/fusedock
@@ -192,7 +192,7 @@ Provider-specific configuration uses repeatable `--option key=value`. Credential
 
 ## macOS FSKit
 
-FuseDock targets Apple's native FSKit extension on macOS 27. `DataCacheHandler` owns item open/close and cache negotiation; `setCacheState` handles explicit data invalidation. Native verification must establish that old and new open revisions retain separate bytes and attributes. The Swift extension owns the FSKit object model; a Go `c-archive` provides the same provider and VFS core used by Linux and the CLI.
+FuseDock uses Apple's native FSKit extension on macOS 26 and newer. On macOS 26, `OpenCloseOperations` manages readers and each kernel item retains its observed file version; unmount and mount again to refresh remotely changed files. On macOS 27, an Xcode 27 build selects `DataCacheHandler` for cache negotiation and `setCacheState` for explicit data invalidation. Native macOS 27 verification must establish that old and new open revisions retain separate bytes and attributes. The Swift extension owns the FSKit object model; a Go `c-archive` provides the same provider and VFS core used by Linux and the CLI.
 
 ```sh
 DEVELOPMENT_TEAM=YOUR_TEAM_ID make macos-install
@@ -232,7 +232,7 @@ make build
 
 `make check` runs formatting checks, `go vet`, the race-enabled test suite, and cross-compiles Linux, macOS, and Windows binaries. New providers can use `pkg/providertest` for shared namespace and range-read conformance checks. Native FUSE and FSKit mount tests are separate because they require a filesystem driver, signing, and a real mount point.
 
-`make test-core`, `make test-gofuse`, `make test-linux`, `make test-macos`, and `make test-windows` are separate test entries. The three native entries opt into real mounts and require their respective host driver. GitHub Actions has separate core, go-fuse, Linux FUSE, Windows WinFsp, Xcode 27, and cross-build jobs. The FSKit native job requires a configured signed-extension host. On any network-enabled machine, `make test-live-pku` checks the public PKU login page without credentials.
+`make test-core`, `make test-gofuse`, `make test-linux`, `make test-macos`, and `make test-windows` are separate test entries. The three native entries opt into real mounts and require their respective host driver. GitHub Actions has separate core, go-fuse, Linux FUSE, Windows WinFsp, Xcode 26/27, and cross-build jobs. The FSKit native job requires a configured signed-extension host. On any network-enabled machine, `make test-live-pku` checks the public PKU login page without credentials.
 
 The PKU provider's IAAA/AnyShare flow is derived from the Apache-2.0 `unofficialpku/disk` project. See [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
 

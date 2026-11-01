@@ -2,6 +2,15 @@ import AppKit
 import SwiftUI
 
 struct ContentView: View {
+    private var cacheRefreshDescription: String {
+        #if FUSEDOCK_FSKIT27
+        if #available(macOS 27.0, *) {
+            return "Remote content changes use the system cache refresh API."
+        }
+        #endif
+        return "To refresh files changed remotely, unmount and mount the account again."
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 18) {
             HStack(spacing: 14) {
@@ -38,7 +47,11 @@ struct ContentView: View {
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
 
-            Text("Read-only preview · no kernel extension · no macFUSE")
+            Text(cacheRefreshDescription)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+
+            Text("Read-only · FSKit")
                 .font(.caption)
                 .foregroundStyle(.tertiary)
         }

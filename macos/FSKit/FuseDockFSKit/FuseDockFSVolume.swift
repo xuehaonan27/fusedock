@@ -1,10 +1,9 @@
 import Foundation
 import FSKit
 
-final class FuseDockFSVolume: FSVolume,
+class FuseDockFSVolume: FSVolume,
                              FSVolume.Operations,
-                             FSVolume.ReadWriteOperations,
-                             FSVolume.DataCacheHandler {
+                             FSVolume.ReadWriteOperations {
     let bridge: FuseDockBridge
     let rootItem: FuseDockFSItem
     var items: [String: FuseDockFSItem] = [:]
@@ -28,22 +27,38 @@ final class FuseDockFSVolume: FSVolume,
     }
 
     func item(for object: FuseDockObject) throws -> FuseDockFSItem {
-        let previous = itemQueue.sync { items[object.id] }
-        if let previous {
-            previous.readLock.lock()
-            let sameRevision = previous.object.contentVersion == object.contentVersion &&
-                previous.object.version == object.version && previous.object.size == object.size
-            previous.readLock.unlock()
-            if sameRevision { return previous }
-            // Kernel callbacks can reenter the module during invalidation.
-            // The old item keeps its reader; its bytes never change revisions.
-            if let error = setCacheState(for: previous, cacheMode: .readWithCache,
-                                        coherencyType: .readCache, action: .invalidate) {
-                throw error
-            }
+        itemQueue.sync {
+            if let existing = items[object.id] { return existing }
+            let created = FuseDockFSItem(object: object)
+            items[object.id] = created
+            return created
         }
-        let created = FuseDockFSItem(object: object)
-        itemQueue.sync { items[object.id] = created }
-        return created
+    }
+
+    func openRead(_ item: FuseDockFSItem, preservingVersion: Bool = false) throws {
+        item.readLock.lock()
+        defer { item.readLock.unlock() }
+        if item.readHandle != 0 { return }
+        let opened = try bridge.openRead(object: item.object)
+        // macOS 26 cannot invalidate bytes already cached for this FSItem.
+        // A provider without revision reads must report a changed object,
+        // rather than attach newer bytes to the existing kernel cache.
+        let sameContent = item.object.contentVersion.isEmpty
+            ? opened.snapshot.version == item.object.version
+            : opened.snapshot.contentVersion == item.object.contentVersion
+        if preservingVersion && (!sameContent || opened.snapshot.size != item.object.size) {
+            bridge.closeRead(handle: opened.handle)
+            throw POSIXError(.ESTALE)
+        }
+        item.readHandle = opened.handle
+        if !preservingVersion { item.object = opened.snapshot }
+    }
+
+    func closeRead(_ item: FuseDockFSItem) {
+        item.readLock.lock()
+        let handle = item.readHandle
+        item.readHandle = 0
+        item.readLock.unlock()
+        if handle != 0 { bridge.closeRead(handle: handle) }
     }
 }

@@ -77,13 +77,19 @@ jobs:
           FUSEDOCK_WINFSP_TEST: '1'
         run: go test -count=1 -v ./internal/driver/winfsp
   macos-build:
-    runs-on: xcode-27
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-26, xcode-27]
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with:
           go-version: '1.25.x'
       - run: make macos-bridge
+      - name: Check SDK routing
+        run: ./scripts/check-macos-sdk-routing.sh
       - run: xcodebuild -project macos/FSKit/FuseDockFSKit.xcodeproj -scheme FuseDock -configuration Debug -derivedDataPath /tmp/fusedock-ci CODE_SIGNING_ALLOWED=NO build
   macos-native:
     if: github.event_name == 'workflow_dispatch' && inputs.native_fskit

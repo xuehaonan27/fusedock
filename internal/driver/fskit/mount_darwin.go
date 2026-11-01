@@ -29,8 +29,8 @@ func Preflight(path string) error {
 	if _, err := fmt.Sscanf(version, "%d.", &major); err != nil {
 		return err
 	}
-	if major < 27 {
-		return fmt.Errorf("FuseDock FSKit requires macOS 27 or later; this host runs %s", version)
+	if major < 26 {
+		return fmt.Errorf("FuseDock FSKit requires macOS 26 or later; this host runs %s", version)
 	}
 	entries, err := os.ReadDir(path)
 	if err != nil {

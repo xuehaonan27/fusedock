@@ -1,6 +1,6 @@
 # Filesystem foundation: implementation and evidence
 
-Updated 2026-10-30. [TODO.md](../TODO.md) remains the complete acceptance plan. This document records the current working tree and observed checks. The filesystem foundation has open acceptance and implementation items.
+Updated 2026-11-01. [TODO.md](../TODO.md) remains the complete acceptance plan. This document records the current working tree and observed checks. The filesystem foundation has open acceptance and implementation items.
 
 ## Implemented
 
@@ -17,7 +17,7 @@ Updated 2026-10-30. [TODO.md](../TODO.md) remains the complete acceptance plan. 
 | Daemon | Shared cache and metadata/IPC concurrency, session pooling, local control, data attachment, saved mount restoration, reauthentication by AccountID, account-removal/rebind observation, lifecycle state/error reporting. |
 | CLI | Daemon start/status/mount/unmount/refresh/reauthenticate/stop, ls/cat over daemon data, cache administration, service install/uninstall, account rename. |
 | Platforms | Compile-time dispatch to Linux, macOS FSKit, Windows WinFsp. Daemon imports the generic mount contract; adapter selection happens in the host. Reusable go-fuse translation is separate from Linux mounting. |
-| FSKit | macOS 27 deployment target, DataCacheHandler cache negotiation, explicit item read handles, close/reclaim release, separate FSItem instances for changed versions, invalidation outside module locks. Xcode 27 compilation passed; native acceptance remains pending. |
+| FSKit | macOS 26 minimum; separate compatibility OpenCloseOperations and macOS 27 DataCacheHandler classes. SDK conditions and runtime availability select the lifecycle. Shared explicit read handles, close/reclaim release and broker. macOS 26 native remount-refresh acceptance passed; macOS 27 active-invalidation acceptance remains pending. |
 
 ## Checks executed locally
 
@@ -25,13 +25,15 @@ Host: macOS 26.5.1, arm64. Default Go: 1.27.3. Xcode: 26.6.
 
 - `make check`: formatting, `go vet`, all Go race tests, Linux/macOS/Windows CLI cross-builds passed.
 - `GOTOOLCHAIN=go1.25.0 go test ./internal/blockcache ./internal/daemon ./internal/vfs`: passed.
-- Go bridge `c-archive` build: passed locally and in the Xcode 27 Actions job.
+- Go bridge `c-archive` build: passed locally and in the previous Xcode 27 Actions job.
+- Xcode 26.6 unsigned and Apple Development signed app builds: passed. Installed to the existing `~/Applications/FuseDock.app`; PluginKit lists one FuseDock extension.
+- macOS 26 native compatibility contract: passed for both revision-capable and current-content-only provider fixtures, including directory listing, simultaneous readers, uncached and cross-block reads, frozen size/EOF, close/reopen, write rejection and refresh by remount. A changed current-content provider reports `ESTALE` on reopen; the remounted view reads the new content.
 - Core snapshot sharing exercised 1, 10, 100, and 1,000 concurrent readers. Each immutable revision was fetched once in the fixture.
 - Cache tests exercised waiter cancellation, payload reservations, a hot working set mixed with scans, pinned clear, restart hits, corrupt entries, and namespace isolation.
 - Daemon fixture tests exercised authenticated control, binary data reads, renamed-account reauthentication, stable volume identity after restoration, and visible native-unmount errors.
 - The go-fuse library suite reproduced equal-StableAttr deduplication and verified distinct object allocation and distinct generations for changed revisions.
 
-These tests use fake credential stores and local HTTP/provider fixtures. Windows runs include positive private-file reads, rejection of broad DACLs, and hard-link rejection. Real account credentials were not read or changed. No new host service registration or app installation was performed.
+These tests use fake credential stores and local HTTP/provider fixtures. Windows runs include positive private-file reads, rejection of broad DACLs, and hard-link rejection. Real account credentials were not read or changed. The existing signed app was updated for local compatibility acceptance. No host service registration was performed.
 
 ## Native acceptance and CI
 
@@ -43,10 +45,11 @@ The shared native contract mounts a fixture and checks directory enumeration, ol
 | `make test-gofuse` | Linux or macOS; no mount | Passed |
 | `make test-linux` | Linux with FUSE 3 and `/dev/fuse` | Passed in the first Actions run |
 | `make test-windows` | Windows with WinFsp | Passed in the final code Actions run |
-| Xcode build job | `xcode-27` runner | Passed with Xcode 27.1 and macOS 27 SDK |
-| `make test-macos` | macOS 27, matching signed and enabled extension | User chose local acceptance after upgrading this Mac |
+| Xcode build jobs | `macos-26` and `xcode-27` runners | Separate SDK builds and compile-condition checks configured |
+| `make test-macos` | macOS 26, matching signed and enabled extension | Remount-refresh native contract passed locally |
+| `make test-macos` | macOS 27, matching signed and enabled extension | Active-invalidation native contract awaits local OS upgrade |
 
-The public repository is [xuehaonan27/fusedock](https://github.com/xuehaonan27/fusedock). Code commit `7faa61f` passed all ten enabled CI jobs; the subsequent acceptance-record update changes documentation only. [The first Actions run](https://github.com/xuehaonan27/fusedock/actions/runs/41034945547) passed Linux native FUSE, Xcode 27 compilation, Linux/macOS core tests, race tests, go-fuse library tests, and cross-builds. The initial Windows failures led to SID/DACL validation, native mountpoint preparation, and readiness fixes. [The final code Actions run](https://github.com/xuehaonan27/fusedock/actions/runs/41038439790) passed all ten enabled jobs, including Windows core and native snapshot acceptance. macOS native mounting was skipped; the user chose to run it locally after upgrading this Mac to macOS 27. The current Mac cannot compile or run macOS 27 FSKit APIs. Cross-build success is recorded separately from native filesystem results.
+The public repository is [xuehaonan27/fusedock](https://github.com/xuehaonan27/fusedock). Code commit `7faa61f` passed all ten enabled CI jobs; the subsequent acceptance-record update changes documentation only. [The first Actions run](https://github.com/xuehaonan27/fusedock/actions/runs/41034945547) passed Linux native FUSE, Xcode 27 compilation, Linux/macOS core tests, race tests, go-fuse library tests, and cross-builds. The initial Windows failures led to SID/DACL validation, native mountpoint preparation, and readiness fixes. [The final code Actions run](https://github.com/xuehaonan27/fusedock/actions/runs/41038439790) passed all ten enabled jobs, including Windows core and native snapshot acceptance. That run skipped macOS native mounting. The subsequent macOS 26 compatibility contract has now passed locally; the macOS 27 contract still awaits a local OS upgrade. The SDK 26 build excludes SDK 27 symbols. Cross-build success is recorded separately from native filesystem results.
 
 ## Open work in the same acceptance plan
 
@@ -63,7 +66,7 @@ The completed code and these open items belong to the same delivery. WebDAV and 
 
 ## Runtime minimums
 
-Go 1.25 supplies confined `os.Root.Rename` and `os.Root.Chtimes`; see the [Go 1.25 release notes](https://go.dev/doc/go1.25). macOS 27 supplies the FSKit [DataCacheHandler](https://developer.apple.com/documentation/fskit/fsvolume/datacachehandler) and [setCacheState](https://developer.apple.com/documentation/fskit/fsvolume/setcachestate(for:cachemode:coherencytype:action:)) APIs used by the extension.
+Go 1.25 supplies confined `os.Root.Rename` and `os.Root.Chtimes`; see the [Go 1.25 release notes](https://go.dev/doc/go1.25). The app deployment target is macOS 26, where Path URL resources and OpenCloseOperations support the compatibility lifecycle. Xcode 26 builds that lifecycle; Xcode 27+ builds both lifecycles with runtime selection. macOS 27 supplies the FSKit [DataCacheHandler](https://developer.apple.com/documentation/fskit/fsvolume/datacachehandler) and [setCacheState](https://developer.apple.com/documentation/fskit/fsvolume/setcachestate(for:cachemode:coherencytype:action:)) APIs used by the extension.
 
 ## Existing accounts and persistence
 

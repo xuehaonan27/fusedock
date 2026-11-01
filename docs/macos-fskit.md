@@ -24,11 +24,25 @@ The source path passed to `mount` is a security-scoped capability file handled b
 
 ## Requirements
 
-- macOS 27 or newer. The cache lifecycle uses `FSVolume.DataCacheHandler` and `setCacheState`, introduced in macOS 27.
-- Xcode 27 with the macOS 27 SDK and a valid Apple Development signing identity.
+- macOS 26 or newer. Path URL resources used for mounting require macOS 26.
+- Xcode 26 or newer and a valid Apple Development signing identity. Xcode 26 builds the compatibility implementation. Xcode 27 builds both implementations and selects one at runtime.
 - A development team with the FSKit file-system-extension entitlement. Xcode obtains the profile automatically for normal Apple Developer accounts.
 
 No macFUSE installation is needed.
+
+## OS behavior
+
+| Build and host | Lifecycle | Refresh behavior |
+| --- | --- | --- |
+| Xcode 26 build on macOS 26+ | `OpenCloseOperations` | Remount to refresh remotely changed files |
+| Xcode 27+ build on macOS 26 | `OpenCloseOperations` | Remount to refresh remotely changed files |
+| Xcode 27+ build on macOS 27+ | `DataCacheHandler` | Explicit kernel data/attribute invalidation; full native acceptance pending |
+
+Both paths use the same broker, provider contracts, namespace and block cache. They use normal kernel buffering. The compatibility path pins a file's observed metadata and content version for its `FSItem` lifetime. For providers with revision reads, reopening that item reads the same revision. Closing the last reader releases the provider handle; reclaim releases the item. A provider that cannot reopen the observed revision reports `ESTALE` when the newly opened metadata differs. The provider's read capabilities still determine whether its bytes have an immutable snapshot guarantee.
+
+The item lifetime is controlled by the kernel. This is not a mount-wide historical snapshot of the remote directory tree: new lookups can observe new objects. Remounting is the supported way to refresh the whole mounted view. `daemon refresh` clears daemon metadata; on macOS 26 it cannot invalidate kernel-cached files. Finder previews and file reads use this same compatibility behavior.
+
+`FuseDockCompatibilityFSVolume.swift` and `FuseDockCachedFSVolume.swift` own the two lifecycles. The SDK condition in `FuseDock.xcconfig` excludes unavailable symbols from Xcode 26 compilation; `#available(macOS 27, *)` selects the runtime implementation in a newer build. The app displays the applicable refresh instruction.
 
 ## Build and install
 
@@ -85,24 +99,38 @@ The NFS bridge remains a future fallback for systems where FSKit or extension de
 - The FSKit extension is read-only.
 - CAPTCHA/OTP prompts are not yet connected to the host application.
 - The daemon has launchd service registration and same-user UDS control. Signed peer authentication and automatic extension reconnection are pending.
-- Xcode 27 compilation passed in GitHub Actions. Native revision/cache acceptance needs macOS 27 with the signed extension enabled; the current development machine runs macOS 26.5.1.
+- The macOS 27 active-invalidation contract still needs native acceptance on a macOS 27 host. macOS 26 has a separate native remount-refresh contract.
 - The legacy direct credential-file path remains as a fallback, but it is read-only and does not persist a refresh session.
 - The extension requires local signing and the one-time Filesystem Extension toggle.
 - The current implementation is a development build; distribution needs an app bundle, notarization, and a release workflow.
 
 ## Daemon mounting
 
-On macOS 27 with the matching extension installed:
+On macOS 26 or newer with the matching extension installed:
 
 ```sh
 bin/fusedock daemon start
 mkdir -p "$HOME/FuseDockPKU"
-bin/fusedock daemon mount --id pku --account pku --mountpoint "$HOME/FuseDockPKU"
+bin/fusedock daemon mount --id pku --account pku --mountpoint "$HOME/FuseDockPKU" \
+  --persistent-cache=false
 bin/fusedock daemon status
 bin/fusedock daemon unmount --id pku
 bin/fusedock daemon stop
 ```
 
+The example supports existing account records without an AccountID. For a new binding with an AccountID, omit `--persistent-cache=false` to retain eligible blocks on disk.
+
+To refresh remote changes on macOS 26, close files opened from the mount, then run:
+
+```sh
+bin/fusedock daemon unmount --id pku
+bin/fusedock daemon refresh --account pku
+bin/fusedock daemon mount --id pku --account pku --mountpoint "$HOME/FuseDockPKU" \
+  --persistent-cache=false
+```
+
 `daemon install` registers the user LaunchAgent for login and failure recovery. `daemon uninstall` removes the registration. These commands are explicit service operations. A normal `daemon start` does not install a login agent.
 
-See Apple's [DataCacheHandler documentation](https://developer.apple.com/documentation/fskit/fsvolume/datacachehandler) and [setCacheState documentation](https://developer.apple.com/documentation/fskit/fsvolume/setcachestate(for:cachemode:coherencytype:action:)). Cache state changes run outside module locks because the kernel can reenter the extension during the call.
+Run `make test-macos` with the matching signed extension installed. On macOS 26 it runs directory/read/reopen/EOF/read-only/remount-refresh acceptance; on macOS 27 it runs the active-invalidation snapshot contract. Each suite reports the other OS contract as skipped.
+
+See Apple's [OpenCloseOperations documentation](https://developer.apple.com/documentation/fskit/fsvolume/opencloseoperations), [DataCacheHandler documentation](https://developer.apple.com/documentation/fskit/fsvolume/datacachehandler) and [setCacheState documentation](https://developer.apple.com/documentation/fskit/fsvolume/setcachestate(for:cachemode:coherencytype:action:)). Cache state changes run outside module locks because the kernel can reenter the extension during the call.

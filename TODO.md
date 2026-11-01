@@ -1,6 +1,6 @@
 # FuseDock engineering plan
 
-Updated: 2026-10-30. This is the authoritative implementation plan. The design review and experiments remain evidence; the decisions below supersede their earlier implementation ordering.
+Updated: 2026-11-01. This is the authoritative implementation plan. The design review and experiments remain evidence; the decisions below supersede their earlier implementation ordering.
 
 FuseDock provides a filesystem abstraction. Its public behavior covers paths, object identity, open/read/close, attributes, random access, errors, and native caching. A read snapshot is a valid filesystem consistency model. The core keeps version-bound snapshots; each platform adapter must implement their observable behavior across the entire read path.
 
@@ -10,7 +10,7 @@ The work below is grouped by responsibility, not implementation stages. Deliver 
 
 The current code and test results are recorded in [foundation status](docs/foundation-status.md). Checked items below identify implemented and locally verified responsibilities; the complete foundation is still open while native acceptance and the listed implementation work remain outstanding.
 
-The user authorized GitHub Actions runners for Linux/Windows and macOS 27 as the minimum for the FSKit cache lifecycle. CI entries are configured. The user authorized creating the public repository `xuehaonan27/fusedock` and running these Actions jobs. The current macOS 26.5.1/Xcode 26.6 host cannot compile or execute the FSKit 27 APIs.
+The user authorized GitHub Actions runners and the public repository `xuehaonan27/fusedock`. On 2026-11-01 the user requested local use on macOS 26.5.1. Keep a macOS 26 FSKit compatibility implementation with remount-based refresh and a separate macOS 27 cache-invalidation implementation. Both share the same core and account broker. Xcode 26 builds compatibility; Xcode 27 builds both with runtime selection.
 
 ## Filesystem behavior and read lifetime
 
@@ -102,6 +102,7 @@ platform_linux.go  platform_darwin.go  platform_windows.go
 - [ ] Implement native-cache/snapshot coherence and open/close/reclaim behavior in each adapter. Restore persistent FSKit IDs only with a durable mapping and lookup tests.
 - [x] Run actual Linux and Windows directory/read/reopen/snapshot/EOF/rename-observation/unmount contracts on GitHub Actions runners. [Passing run](https://github.com/xuehaonan27/fusedock/actions/runs/41038439790).
 - [x] Build the Swift FSKit app and Go bridge using Xcode 27.1 and the macOS 27 SDK in Actions.
+- [x] Validate Xcode 26 compatibility builds and local native remount-refresh acceptance for revision and current-content providers. Keep Xcode 26/27 CI builds separate.
 - [ ] After the user upgrades this Mac to macOS 27, run native mount/read/reopen/rename-observation/unmount acceptance with the matching signed extension enabled. The user selected local post-upgrade acceptance on 2026-10-30.
 
 Acceptance: the core has no native driver dependency; platform builds select exactly their adapter; library tests do not require a native mount; each native test result identifies its OS and driver. Cross-compilation is a separate build check.

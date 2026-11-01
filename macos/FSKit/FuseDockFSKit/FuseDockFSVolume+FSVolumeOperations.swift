@@ -108,9 +108,7 @@ extension FuseDockFSVolume {
             replyHandler(POSIXError(.EINVAL))
             return
         }
-        fsItem.readLock.lock()
-        if fsItem.readHandle != 0 { bridge.closeRead(handle: fsItem.readHandle); fsItem.readHandle = 0 }
-        fsItem.readLock.unlock()
+        closeRead(fsItem)
         itemQueue.sync {
             if fsItem !== rootItem && items[fsItem.object.id] === fsItem {
                 items.removeValue(forKey: fsItem.object.id)
@@ -137,7 +135,7 @@ extension FuseDockFSVolume {
                 let start = min(Int(cookie.rawValue), objects.count)
                 for index in start..<objects.count {
                     let child = try self.item(for: objects[index])
-                    let attrs = attributes.map { self.attributes(for: objects[index], desired: $0) }
+                    let attrs = attributes.map { self.attributes(for: child.object, desired: $0) }
                     let packed = packer.packEntry(
                         name: FSFileName(string: objects[index].name),
                         itemType: child.itemType,
@@ -211,61 +209,6 @@ extension FuseDockFSVolume {
         replyHandler(nil, POSIXError(.ENOTSUP))
     }
 
-    func open(
-        _ item: FSItem,
-        modes: FSVolume.OpenModes,
-        cacheMode: FSVolume.DataCacheMode,
-        context: FSContext,
-        replyHandler reply: @escaping @Sendable (FSOpenItemResult?, (any Error)?) -> Void
-    ) {
-        guard !modes.contains(.write) else { reply(nil, POSIXError(.EROFS)); return }
-        guard let fsItem = item as? FuseDockFSItem else { reply(nil, POSIXError(.EINVAL)); return }
-        if fsItem.object.isDirectory {
-            reply(FSOpenItemResult(grantedCoherency: .noCache), nil)
-            return
-        }
-        DispatchQueue.global(qos: .userInitiated).async {
-            fsItem.readLock.lock()
-            do {
-                if fsItem.readHandle == 0 {
-                    let opened = try self.bridge.openRead(object: fsItem.object)
-                    fsItem.readHandle = opened.handle
-                    fsItem.object = opened.snapshot
-                }
-                fsItem.readLock.unlock()
-                let coherency: FSVolume.KernelCacheCoherencyType = cacheMode == .none ? .noCache : .readCache
-                reply(FSOpenItemResult(grantedCoherency: coherency), nil)
-            } catch {
-                fsItem.readLock.unlock()
-                reply(nil, Self.posixError(for: error))
-            }
-        }
-    }
-
-    func upgrade(
-        _ item: FSItem,
-        cacheMode: FSVolume.DataCacheMode,
-        context: FSContext,
-        replyHandler reply: @escaping @Sendable (FSUpgradeItemResult?, (any Error)?) -> Void
-    ) {
-        let coherency: FSVolume.KernelCacheCoherencyType = cacheMode == .none ? .noCache : .readCache
-        reply(FSUpgradeItemResult(grantedCoherency: coherency), nil)
-    }
-
-    func close(
-        _ item: FSItem,
-        context: FSContext,
-        replyHandler reply: @escaping @Sendable () -> Void
-    ) {
-        guard let fsItem = item as? FuseDockFSItem else { reply(); return }
-        fsItem.readLock.lock()
-        let handle = fsItem.readHandle
-        fsItem.readHandle = 0
-        fsItem.readLock.unlock()
-        if handle != 0 { bridge.closeRead(handle: handle) }
-        reply()
-    }
-
     func read(
         from item: FSItem,
         at offset: off_t,
@@ -332,7 +275,7 @@ extension FuseDockFSVolume {
         return attrs
     }
 
-    private static func posixError(for error: Error) -> Error {
+    static func posixError(for error: Error) -> Error {
         if let error = error as? POSIXError { return error }
         let message = error.localizedDescription.lowercased()
         if message.contains("not found") { return POSIXError(.ENOENT) }
