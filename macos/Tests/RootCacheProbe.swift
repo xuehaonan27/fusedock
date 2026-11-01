@@ -166,7 +166,8 @@ class RootCacheProbe: FSVolume, FSVolume.Operations, FSVolume.DataCacheHandler {
         replyHandler(nil, POSIXError(.ENOTSUP))
     }
 
-    @objc func write(
+    @objc(writeContents:toFile:atOffset:replyHandler:)
+    func write(
         contents: Data,
         to item: FSItem,
         at offset: off_t,
