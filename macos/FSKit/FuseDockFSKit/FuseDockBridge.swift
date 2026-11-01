@@ -51,6 +51,8 @@ final class FuseDockBridge {
         fusedock_close(token)
     }
 
+    var entryTTL: TimeInterval { fusedock_entry_ttl(token) }
+
     var volumeID: UUID {
         guard let value = fusedock_volume_id(token) else { return UUID() }
         defer { fusedock_free(value) }

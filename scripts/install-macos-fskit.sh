@@ -11,6 +11,8 @@ if [[ ! -d "$source_app" ]]; then
   exit 1
 fi
 
+codesign --verify --deep --strict "$source_app"
+
 mkdir -p "$HOME/Applications"
 osascript -e 'tell application id "dev.fusedock.app" to quit' 2>/dev/null || true
 
@@ -35,4 +37,4 @@ pluginkit -e use -p com.apple.fskit.fsmodule -i "$extension_id" 2>/dev/null || t
 
 printf 'Installed %s\n' "$dest_app"
 printf 'If macOS still lists disabled extensions, quit and reopen System Settings.\n'
-printf 'Enable the single FuseDock entry under File System Extensions.\n'
+printf 'Enable FuseDock under By Category > File System Extensions.\n'

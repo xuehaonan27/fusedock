@@ -37,14 +37,17 @@ extension FuseDockFSVolume {
     }
 
     func deactivate(options: FSDeactivateOptions = [], replyHandler: @escaping ((any Error)?) -> Void) {
+        stopCacheMaintenance()
         replyHandler(nil)
     }
 
     func mount(options: FSTaskOptions, replyHandler: @escaping (Error?) -> Void) {
+        startCacheMaintenance()
         replyHandler(nil)
     }
 
     func unmount(replyHandler: @escaping () -> Void) {
+        stopCacheMaintenance()
         closed = true
         replyHandler()
     }

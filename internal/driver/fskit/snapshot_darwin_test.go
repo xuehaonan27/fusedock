@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"testing"
+	"time"
 
 	native "github.com/xuehaonan27/fusedock/internal/driver/fskit"
 	"github.com/xuehaonan27/fusedock/internal/nativetest"
@@ -20,7 +21,7 @@ func TestFSKitSnapshotContract(t *testing.T) {
 		t.Skip("active kernel cache invalidation requires macOS 27; macOS 26 uses the remount contract")
 	}
 	nativetest.Run(t, func(ctx context.Context, s provider.Session, path string, ready func()) error {
-		return native.Mount(ctx, s, path, native.Options{ReadOnly: true, Ready: ready})
+		return native.Mount(ctx, s, path, native.Options{ReadOnly: true, EntryTTL: 50 * time.Millisecond, Ready: ready})
 	})
 }
 

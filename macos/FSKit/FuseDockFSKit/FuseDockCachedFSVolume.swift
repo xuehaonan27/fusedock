@@ -1,9 +1,40 @@
 #if FUSEDOCK_FSKIT27
 import Foundation
 import FSKit
+import OSLog
 
 @available(macOS 27.0, *)
 final class FuseDockCachedFSVolume: FuseDockFSVolume, FSVolume.DataCacheHandler {
+    private var cacheTimer: DispatchSourceTimer?
+
+    override func startCacheMaintenance() {
+        let timer = DispatchSource.makeTimerSource(queue: DispatchQueue(label: "dev.fusedock.fskit.expiry", qos: .utility))
+        timer.schedule(deadline: .now() + bridge.entryTTL, repeating: bridge.entryTTL)
+        timer.setEventHandler { [weak self] in self?.expireDirectoryEntries() }
+        cacheTimer = timer
+        timer.resume()
+        Logger.fusedock.info("FSKit 27 cache lifecycle started")
+    }
+
+    override func stopCacheMaintenance() {
+        cacheTimer?.cancel()
+        cacheTimer = nil
+    }
+
+    deinit { cacheTimer?.cancel() }
+
+    private func expireDirectoryEntries() {
+        // Expiring directory names makes later opens resolve current metadata.
+        // This does not poll providers or discard version-bound file blocks.
+        let directories = itemQueue.sync { items.values.filter { $0.object.isDirectory } }
+        for directory in directories {
+            if let error = setCacheState(for: directory, cacheMode: .none,
+                                        coherencyType: .noCache, action: .invalidate) {
+                Logger.fusedock.error("Directory cache expiry failed: \(error.localizedDescription, privacy: .public)")
+            }
+        }
+    }
+
     override func item(for object: FuseDockObject) throws -> FuseDockFSItem {
         let previous = itemQueue.sync { items[object.id] }
         if let previous {

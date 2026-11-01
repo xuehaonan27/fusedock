@@ -72,6 +72,7 @@ func Mount(ctx context.Context, s provider.Session, path string, o Options) erro
 	defer listener.Close()
 	config := filepath.Join(dir, "mount.credentials")
 	values := map[string][]byte{"provider": []byte("broker"), "endpoint": []byte("http://" + listener.Addr().String()), "token": []byte(token)}
+	values["entry_ttl"] = []byte(o.EntryTTL.String())
 	if volume, ok := s.(interface{ VolumeID() string }); ok {
 		values["volume_id"] = []byte(volume.VolumeID())
 	}

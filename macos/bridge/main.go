@@ -44,6 +44,7 @@ type wireObject struct {
 }
 
 type bridgeState struct {
+	entryTTL   time.Duration
 	nodes      namespace.Nodes
 	volumeID   string
 	session    provider.Session
@@ -72,6 +73,17 @@ func fusedock_open(configPath *C.char, errorOut **C.char) *C.FuseDockHandle {
 		return nil
 	}
 	defer clearValues(values)
+	entryTTL := 2 * time.Second
+	if value := string(values["entry_ttl"]); value != "" {
+		duration, err := time.ParseDuration(value)
+		if err != nil {
+			setError(errorOut, fmt.Errorf("invalid entry TTL: %w", err))
+			return nil
+		}
+		if duration > 0 {
+			entryTTL = duration
+		}
+	}
 	providerID := strings.TrimSpace(string(values["provider"]))
 	if providerID == "" {
 		providerID = "pku"
@@ -115,7 +127,8 @@ func fusedock_open(configPath *C.char, errorOut **C.char) *C.FuseDockHandle {
 		session = vfs.New(session, 2*time.Second)
 	}
 	state := &bridgeState{
-		session: session, ctx: ctx, cancel: cancel, volumeID: string(values["volume_id"]),
+		entryTTL: entryTTL,
+		session:  session, ctx: ctx, cancel: cancel, volumeID: string(values["volume_id"]),
 		readers: make(map[uint64]provider.Reader), objects: make(map[string]provider.Object),
 	}
 	handles.Lock()
@@ -383,6 +396,11 @@ func fusedock_volume_id(token *C.FuseDockHandle) *C.char {
 		return nil
 	}
 	return C.CString(s.volumeID)
+}
+
+//export fusedock_entry_ttl
+func fusedock_entry_ttl(token *C.FuseDockHandle) C.double {
+	return C.double(lookup(token).entryTTL.Seconds())
 }
 
 func marshal(value any, errorOut **C.char) *C.char {

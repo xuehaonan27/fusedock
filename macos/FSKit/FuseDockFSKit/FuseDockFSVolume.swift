@@ -10,6 +10,9 @@ class FuseDockFSVolume: FSVolume,
     let itemQueue = DispatchQueue(label: "dev.fusedock.fskit.items")
     var closed = false
 
+    func startCacheMaintenance() {}
+    func stopCacheMaintenance() {}
+
     init(configPath: String) throws {
         let bridge = try FuseDockBridge(configPath: configPath)
         let root = try bridge.root()

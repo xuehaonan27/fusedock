@@ -28,10 +28,10 @@ struct ContentView: View {
 
             Text("Enable the file system extension")
                 .font(.headline)
-            Text("System Settings → General → Login Items & Extensions → File System Extensions → FuseDock")
+            Text("System Settings → General → Login Items & Extensions → By Category → File System Extensions → FuseDock")
                 .fixedSize(horizontal: false, vertical: true)
-            Button("Open Login Items & Extensions") {
-                let url = URL(string: "x-apple.systempreferences:com.apple.LoginItems-Settings.extension")!
+            Button("Open File System Extensions") {
+                let url = URL(string: "x-apple.systempreferences:com.apple.ExtensionsPreferences?extensionPointIdentifier=com.apple.fskit.fsmodule")!
                 NSWorkspace.shared.open(url)
             }
 
