@@ -12,6 +12,7 @@ struct FuseDockObject: Decodable, Sendable {
     let version: String
     let contentVersion: String
     let modified: Int64
+    let created: Int64
 
     enum CodingKeys: String, CodingKey {
         case nodeID = "node_id"
@@ -24,6 +25,7 @@ struct FuseDockObject: Decodable, Sendable {
         case contentVersion = "content_version"
         case version
         case modified
+        case created
     }
 
     var isDirectory: Bool { kind == "directory" }

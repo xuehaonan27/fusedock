@@ -41,6 +41,7 @@ type wireObject struct {
 	Size           int64  `json:"size"`
 	Version        string `json:"version"`
 	Modified       int64  `json:"modified"`
+	Created        int64  `json:"created"`
 }
 
 type bridgeState struct {
@@ -372,13 +373,16 @@ func (s *bridgeState) encodeObject(object provider.Object) wireObject {
 	if object.IsDir() {
 		kind = "directory"
 	}
-	var modified int64
+	var modified, created int64
 	if !object.Modified.IsZero() {
 		modified = object.Modified.UnixNano()
 	}
+	if !object.Created.IsZero() {
+		created = object.Created.UnixNano()
+	}
 	return wireObject{
 		ID: object.ID, ParentID: object.ParentID, Name: object.Name, Kind: kind, NodeID: s.nodes.ID(namespace.NodeKey{ObjectID: object.ID}), ParentNodeID: s.parentNodeID(object.ParentID),
-		Size: object.Size, Version: object.Version, ContentVersion: object.ContentVersion, Modified: modified,
+		Size: object.Size, Version: object.Version, ContentVersion: object.ContentVersion, Modified: modified, Created: created,
 	}
 }
 

@@ -11,12 +11,12 @@ extension FuseDockCachedFSVolume {
 
     func deactivateVolume(options: FSDeactivateOptions,
                           replyHandler reply: @escaping @Sendable ((any Error)?) -> Void) {
-        deactivate(options: options, replyHandler: reply)
+        deactivateRoot(options: options, replyHandler: reply)
     }
 
     func lookupItem(named name: FSFileName, in directory: FSItem, context: FSContext,
                     replyHandler reply: @escaping @Sendable (FSLookupItemResult?, (any Error)?) -> Void) {
-        lookupItem(named: name, inDirectory: directory) { item, name, error in
+        resolveEntry(named: name, inDirectory: directory) { item, name, error in
             guard let item = item as? FuseDockFSItem, let name else { reply(nil, error); return }
             item.readLock.lock()
             let attrs = self.attributes(for: item.object, desired: FSLookupItemResult.requestedAttributes)
@@ -28,7 +28,9 @@ extension FuseDockCachedFSVolume {
 
     func getAttributes(_ desired: FSItem.GetAttributesRequest, of item: FSItem, context: FSContext,
                        replyHandler reply: @escaping @Sendable (FSGetAttributesResult?, (any Error)?) -> Void) {
-        getAttributes(desired, of: item) { attrs, error in
+        let request = FSItem.GetAttributesRequest()
+        request.wantedAttributes = desired.wantedAttributes.union(FSGetAttributesResult.requestedAttributes.wantedAttributes)
+        readAttributes(request, of: item) { attrs, error in
             guard let attrs else { reply(nil, error); return }
             let result = FSGetAttributesResult(attributes: attrs)
             reply(result, result == nil ? POSIXError(.EIO) : nil)
@@ -39,7 +41,7 @@ extension FuseDockCachedFSVolume {
                             verifier: FSDirectoryVerifier, attributes: FSItem.GetAttributesRequest?,
                             packer: FSDirectoryEntryPacker, context: FSContext,
                             replyHandler reply: @escaping @Sendable (FSEnumerateDirectoryResult?, (any Error)?) -> Void) {
-        enumerateDirectory(directory, startingAt: cookie, verifier: verifier, attributes: attributes, packer: packer) { verifier, error in
+        enumerateEntries(directory, startingAt: cookie, verifier: verifier, attributes: attributes, packer: packer) { verifier, error in
             if let error { reply(nil, error); return }
             reply(FSEnumerateDirectoryResult(verifier: verifier.rawValue), nil)
         }
@@ -47,7 +49,7 @@ extension FuseDockCachedFSVolume {
 
     func read(from item: FSItem, at offset: off_t, length: Int, into buffer: FSMutableFileDataBuffer,
               replyHandler reply: @escaping @Sendable (FSReadFileResult?, (any Error)?) -> Void) {
-        read(from: item, at: offset, length: length, into: buffer) { (count: Int, error: Error?) in
+        readData(from: item, at: offset, length: length, into: buffer) { (count: Int, error: Error?) in
             if let error { reply(nil, error); return }
             guard let item = item as? FuseDockFSItem else { reply(nil, POSIXError(.EINVAL)); return }
             item.readLock.lock()

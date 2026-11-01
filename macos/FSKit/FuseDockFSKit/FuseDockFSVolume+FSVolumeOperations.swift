@@ -10,7 +10,7 @@ extension FuseDockFSVolume: FSVolume.PathConfOperations {
 }
 
 extension FuseDockFSVolume {
-    var supportedVolumeCapabilities: FSVolume.SupportedCapabilities {
+    @objc var supportedVolumeCapabilities: FSVolume.SupportedCapabilities {
         let capabilities = FSVolume.SupportedCapabilities()
         // The provider contract currently guarantees IDs only for one mounted
         // session. Flipping this on requires a daemon-owned durable mapping
@@ -25,38 +25,41 @@ extension FuseDockFSVolume {
         return capabilities
     }
 
-    var volumeStatistics: FSStatFSResult {
+    @objc var volumeStatistics: FSStatFSResult {
         let result = FSStatFSResult(fileSystemTypeName: "fusedock")
         result.blockSize = 4096
         result.ioSize = 4 << 20
         return result
     }
 
-    func activate(options: FSTaskOptions, replyHandler: @escaping (FSItem?, (any Error)?) -> Void) {
+    func activateRoot(options: FSTaskOptions, replyHandler: @escaping (FSItem?, (any Error)?) -> Void) {
         replyHandler(rootItem, nil)
     }
 
-    func deactivate(options: FSDeactivateOptions = [], replyHandler: @escaping ((any Error)?) -> Void) {
+    func deactivateRoot(options: FSDeactivateOptions = [], replyHandler: @escaping ((any Error)?) -> Void) {
         stopCacheMaintenance()
         replyHandler(nil)
     }
 
+    @objc(mountWithOptions:replyHandler:)
     func mount(options: FSTaskOptions, replyHandler: @escaping (Error?) -> Void) {
         startCacheMaintenance()
         replyHandler(nil)
     }
 
+    @objc(unmountWithReplyHandler:)
     func unmount(replyHandler: @escaping () -> Void) {
         stopCacheMaintenance()
         closed = true
         replyHandler()
     }
 
+    @objc(synchronizeWithFlags:replyHandler:)
     func synchronize(flags: FSSyncFlags, replyHandler: @escaping ((any Error)?) -> Void) {
         replyHandler(nil)
     }
 
-    func getAttributes(
+    func readAttributes(
         _ desiredAttributes: FSItem.GetAttributesRequest,
         of item: FSItem,
         replyHandler: @escaping (FSItem.Attributes?, Error?) -> Void
@@ -78,15 +81,7 @@ extension FuseDockFSVolume {
         }
     }
 
-    func setAttributes(
-        _ newAttributes: FSItem.SetAttributesRequest,
-        on item: FSItem,
-        replyHandler: @escaping (FSItem.Attributes?, Error?) -> Void
-    ) {
-        replyHandler(nil, POSIXError(.EROFS))
-    }
-
-    func lookupItem(
+    func resolveEntry(
         named name: FSFileName,
         inDirectory directory: FSItem,
         replyHandler: @escaping (FSItem?, FSFileName?, Error?) -> Void
@@ -106,6 +101,7 @@ extension FuseDockFSVolume {
         }
     }
 
+    @objc(reclaimItem:replyHandler:)
     func reclaimItem(_ item: FSItem, replyHandler: @escaping (Error?) -> Void) {
         guard let fsItem = item as? FuseDockFSItem else {
             replyHandler(POSIXError(.EINVAL))
@@ -120,7 +116,7 @@ extension FuseDockFSVolume {
         replyHandler(nil)
     }
 
-    func enumerateDirectory(
+    func enumerateEntries(
         _ directory: FSItem,
         startingAt cookie: FSDirectoryCookie,
         verifier: FSDirectoryVerifier,
@@ -155,64 +151,7 @@ extension FuseDockFSVolume {
         }
     }
 
-    func createItem(
-        named name: FSFileName,
-        type: FSItem.ItemType,
-        inDirectory directory: FSItem,
-        attributes: FSItem.SetAttributesRequest,
-        replyHandler: @escaping (FSItem?, FSFileName?, Error?) -> Void
-    ) {
-        replyHandler(nil, nil, POSIXError(.EROFS))
-    }
-
-    func createSymbolicLink(
-        named name: FSFileName,
-        inDirectory directory: FSItem,
-        attributes: FSItem.SetAttributesRequest,
-        linkContents: FSFileName,
-        replyHandler: @escaping (FSItem?, FSFileName?, Error?) -> Void
-    ) {
-        replyHandler(nil, nil, POSIXError(.EROFS))
-    }
-
-    func createLink(
-        to item: FSItem,
-        named name: FSFileName,
-        inDirectory directory: FSItem,
-        replyHandler: @escaping (FSFileName?, Error?) -> Void
-    ) {
-        replyHandler(nil, POSIXError(.EROFS))
-    }
-
-    func removeItem(
-        _ item: FSItem,
-        named name: FSFileName,
-        fromDirectory directory: FSItem,
-        replyHandler: @escaping (Error?) -> Void
-    ) {
-        replyHandler(POSIXError(.EROFS))
-    }
-
-    func renameItem(
-        _ item: FSItem,
-        inDirectory sourceDirectory: FSItem,
-        named sourceName: FSFileName,
-        to destinationName: FSFileName,
-        inDirectory destinationDirectory: FSItem,
-        overItem: FSItem?,
-        replyHandler: @escaping (FSFileName?, Error?) -> Void
-    ) {
-        replyHandler(nil, POSIXError(.EROFS))
-    }
-
-    func readSymbolicLink(
-        _ item: FSItem,
-        replyHandler: @escaping (FSFileName?, Error?) -> Void
-    ) {
-        replyHandler(nil, POSIXError(.ENOTSUP))
-    }
-
-    func read(
+    func readData(
         from item: FSItem,
         at offset: off_t,
         length: Int,
@@ -242,15 +181,6 @@ extension FuseDockFSVolume {
         }
     }
 
-    func write(
-        contents: Data,
-        to item: FSItem,
-        at offset: off_t,
-        replyHandler: @escaping (Int, (any Error)?) -> Void
-    ) {
-        replyHandler(0, POSIXError(.EROFS))
-    }
-
     func attributes(for object: FuseDockObject, desired: FSItem.GetAttributesRequest) -> FSItem.Attributes {
         let attrs = FSItem.Attributes()
         if desired.isAttributeWanted(.uid) { attrs.uid = getuid() }
@@ -263,7 +193,7 @@ extension FuseDockFSVolume {
             attrs.fileID = FSItem.Identifier(rawValue: object.nodeID) ?? .invalid
         }
         if desired.isAttributeWanted(.parentID) {
-            let parent = object.parentID.isEmpty ? 0 : object.parentNodeID
+            let parent = object.parentID.isEmpty ? FSItem.Identifier.parentOfRoot.rawValue : object.parentNodeID
             attrs.parentID = FSItem.Identifier(rawValue: parent) ?? .invalid
         }
         if desired.isAttributeWanted(.type) { attrs.type = object.isDirectory ? .directory : .file }
@@ -275,6 +205,11 @@ extension FuseDockFSVolume {
                 tv_sec: Int(object.modified / 1_000_000_000),
                 tv_nsec: Int(object.modified % 1_000_000_000)
             )
+            // Providers do not expose access time; use the observed mtime.
+            if desired.isAttributeWanted(.accessTime) { attrs.accessTime = timestamp }
+            if desired.isAttributeWanted(.birthTime) {
+                attrs.birthTime = timespec(tv_sec: Int(object.created / 1_000_000_000), tv_nsec: Int(object.created % 1_000_000_000))
+            }
             if desired.isAttributeWanted(.modifyTime) { attrs.modifyTime = timestamp }
             if desired.isAttributeWanted(.changeTime) { attrs.changeTime = timestamp }
         }
