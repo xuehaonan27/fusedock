@@ -1,6 +1,6 @@
 # Filesystem foundation: implementation and evidence
 
-Updated 2026-11-01. [TODO.md](../TODO.md) remains the complete acceptance plan. This document records the current working tree and observed checks. The filesystem foundation has open acceptance and implementation items.
+Updated 2026-11-02. [TODO.md](../TODO.md) remains the complete acceptance plan. This document records the current working tree and observed checks. The filesystem foundation has open acceptance and implementation items.
 
 ## Implemented
 
@@ -80,6 +80,8 @@ A temporary native probe tried five cache-mode/coherency pairs on ordinary files
 The subsequent standalone Swift reproduction removes all provider, broker, VFS and block-cache calls. Root creation order, inode and parent IDs, initial coherency, cache actions and file/directory resources reproduce the same root-only failure. Kernel logs report `methodSetCacheState: no lifsnode found for fh`. Read-only analysis of build 26B123 shows the root stored separately from the node hash table searched by the cache-state operation. This identifies the FSKit/LIFS root lookup as the blocking path; Apple has not confirmed the analysis. The [reproducer, results and kernel-path report](fskit-root-cache.md) document the evidence and a repeatable native runner.
 
 Apple documents that [directory invalidation purges its name cache](https://developer.apple.com/documentation/fskit/fsvolume/kernelcachecoherencyaction/invalidate). File-data invalidation does not clear the parent's name mapping. A normal-adapter diagnostic build granting `.noCache` only to the root also failed root-level reopen. Remounting refreshes the view. A corrected root lookup must pass the standalone probe and both native snapshot contracts. Adding a stable account directory changes the mount layout and leaves top-level membership refresh unresolved; that alternative has not been implemented.
+
+On 2026-11-02, a second standalone Swift probe verified actual file contents: after publishing B and attempting directory invalidation, reopening the cached root name returned A, reopening the child name returned B, and a fresh name in the same root immediately returned B. Old descriptors retained A, size and EOF throughout. File invalidation alone retained A on both paths. Revoking file items refreshed both paths only after the old descriptors closed. Normal-adapter tracing also showed no new file-item resolution in the failing root case and resolutions of v2/v3 in the passing nested case. The [content experiment and callback evidence](fskit-root-cache.md#file-content-experiment-locating-the-stale-read) establish where the stale read persists; root acceptance remains failed.
 
 ## Open work in the same acceptance plan
 

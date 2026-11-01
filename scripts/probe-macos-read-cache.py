@@ -62,12 +62,18 @@ def run_case(output, log_path, action):
         new = {name: open_view(path) for name, path in paths.items()}
         retained = {name: observe(fd) for name, fd in old.items()}
         fresh = {name: open_view(path.with_name("fresh.txt")) for name, path in paths.items()}
+        retained_after_fresh = {name: observe(fd) for name, fd in old.items()}
         for fd in old.values():
             os.close(fd)
         old.clear()
         after_close = {name: open_view(path) for name, path in paths.items()}
+        deadline = time.monotonic() + 2
+        while any(view.get("prefix") != "BBBB" for view in after_close.values()) and time.monotonic() < deadline:
+            time.sleep(0.05)
+            after_close = {name: open_view(path) for name, path in paths.items()}
         result = {"action": action, "probe_id": resource.name, "initial": initial,
-                  "reopened": new, "retained": retained, "fresh_name": fresh, "after_close": after_close}
+                  "reopened": new, "retained": retained, "fresh_name": fresh,
+                  "retained_after_fresh": retained_after_fresh, "after_close": after_close}
         print(json.dumps(result, indent=2), flush=True)
         return result
     finally:
@@ -105,6 +111,7 @@ def main():
     for result in results:
         result["snapshot_contract"] = all(
             result["reopened"][parent] == expected_new and result["retained"][parent] == expected_old
+            and result["retained_after_fresh"][parent] == expected_old
             for parent in ("root", "child"))
     (output / "result.json").write_text(json.dumps(results, indent=2) + "\n")
     return 0 if all(result["snapshot_contract"] for result in results) else 1

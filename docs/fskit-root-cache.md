@@ -1,6 +1,6 @@
 # FSKit root-directory cache invalidation on macOS 27.2
 
-Observed on 2026-11-01, macOS 27.2 (26B123), arm64. The extension was built with the macOS 27 SDK, signed locally, enabled, and mounted successfully.
+Observed on 2026-11-01 and 2026-11-02, macOS 27.2 (26B123), arm64. The extension was built with the macOS 27 SDK, signed locally, enabled, and mounted successfully.
 
 `FSVolume.setCacheState(for: root, cacheMode: .readWithCache, coherencyType: .readCache, action: .invalidate)` returns `NSOSStatusErrorDomain -536870206` (`0xe00002c2`, `kIOReturnBadArgument`). The same call on a looked-up child directory succeeds. The kernel logs:
 
@@ -33,6 +33,45 @@ Source: [RootCacheProbe.swift](../macos/Tests/RootCacheProbe.swift). It implemen
 The committed runner was exercised against [the diagnostic build of `6a28cdd`](https://github.com/xuehaonan27/fusedock/actions/runs/41315622257): five configurations × two resource types, with eight action results per mount. All 40 root calls returned `-536870206`; all 40 child calls succeeded. The kernel log contained 40 matching `no lifsnode found for fh` messages. The runner returned status 1 and unmounted all ten fixtures. After restoring the normal signed app, `make test-macos` again passed remount refresh and the nested snapshot contract and failed root-level reopen.
 
 A separate build of the ordinary adapter granted `.noCache` only for the root. Its full native contract still failed at root-level reopen and passed in the nested case. The five cache-mode/coherency combinations from the earlier adapter probe also failed only for the root. These diagnostic variants are excluded from normal app builds.
+
+## File-content experiment: locating the stale read
+
+The 2026-11-02 investigation added [ReadCacheProbe.swift](../macos/Tests/ReadCacheProbe.swift) and [its native runner](../scripts/probe-macos-read-cache.py). This standalone Swift volume exposes `file.txt` in the root and in `child/`. Revision 1 contains A bytes and is 8,388,625 bytes long; revision 2 contains B bytes and is 8,388,640 bytes long. Each FSItem retains its revision. A private external state file selects the current revision and the cache operation. The runner waits for the module to finish that operation before reopening the paths.
+
+The runner keeps both original descriptors open, publishes revision 2, and compares ordinary reopen, an uncached name (`fresh.txt`) resolving to the same current item, the retained descriptors, and reopen after closing the original descriptors. Prefixes, an initially unread range at 8 MiB, size and EOF are checked. The retained descriptors are checked again after opening the fresh name.
+
+| Operation after publishing B | Reopen root `file.txt` while old FD is open | Reopen `child/file.txt` while old FD is open | Fresh name in either directory | Old descriptors | Reopen after closing old descriptors (root / child) |
+| --- | --- | --- | --- | --- | --- |
+| No invalidation (control) | A | A | B | A | A / A |
+| Invalidate both parent directories | A | B | B | A | A / B |
+| Invalidate both old file items | A | A | B | A | A / A |
+| Revoke both old file items | A | A | B | A | B / B |
+
+All rows were observed using [the signed diagnostic build from `0208ebc`](https://github.com/xuehaonan27/fusedock/actions/runs/41331978546). Directory invalidation returned `-536870206` for the root and zero for the child. File invalidation and file revocation returned zero for both files. No row satisfies simultaneous old-A/new-B opens in both locations; the runner exits 1 and records each case separately.
+
+In the directory-invalidation case, callback logs show this order:
+
+```text
+event=invalidate parent=root revision=0 action=directory code=-536870206
+event=invalidate parent=child revision=0 action=directory code=0
+event=published revision=2 action=directory
+event=lookup parent=child revision=2 name=file.txt
+event=lookup parent=root revision=2 name=fresh.txt
+```
+
+Reopening root `file.txt` returns A without a new lookup for that name. Looking up root `fresh.txt` reaches revision 2 and reads B while the old descriptor still reads A. This demonstrates that the current revision and read delivery work within the same root, while the previously cached name keeps resolving to the old item. The child-directory result demonstrates the effect of a successful parent-directory invalidation.
+
+The normal adapter was also built with tracing at `item(for:)` and open/upgrade, using the `native-trace` variant ([build](https://github.com/xuehaonan27/fusedock/actions/runs/41331564427)). The root native contract recorded two initial file-item resolutions of `v1` (this helper is used by both lookup and enumeration), one file open/upgrade of `v1`, and no resolution of `v2` during the five-second stale-read window. Root invalidation failed 100 times during that window. The nested contract resolved and opened `v2` and `v3` and passed. These normal-adapter traces connect the standalone name-cache behavior to the actual FuseDock failure.
+
+The `.revoke` result narrows the previous documentation-based assessment: on this build it does **not** immediately break the retained descriptors. It permits fresh resolution after the old descriptors close. It does **not** provide fresh opens while those descriptors remain open, which is the required contract. The ordinary adapter continues to use directory invalidation; this experiment adds no revocation policy to it.
+
+To repeat the content experiment, follow the signing/restore procedure below with workflow variant `read-content`, then run:
+
+```sh
+python3 scripts/probe-macos-read-cache.py --output /tmp/fusedock-content-evidence
+```
+
+The output directory must be new. `result.json` contains all byte/size/EOF observations, and `probe.log` contains the corresponding lookup, open, read, close, reclaim and cache-operation events. `--action directory` selects the shortest stale-root/fresh-child comparison. The probe uses the legacy FSVolume operation callbacks plus DataCacheHandler; the normal-adapter trace uses the current Handler/ReadWriteHandler callbacks.
 
 ### Run the reproduction
 
@@ -77,6 +116,6 @@ The required behavior remains: the existing mount layout, new opens resolving a 
 | Unmount, refresh daemon metadata, mount | Refreshes the whole tree; verified locally | Ends the mount and requires applications to release their open files; it does not satisfy in-place refresh acceptance |
 | Stable top-level account directories | Places provider files in ordinary child directories where the snapshot contract passes | Adds a path component; top-level account add/remove/rename still requires root invalidation or remount. This layout is not implemented by this investigation |
 
-Apple documents [directory name-cache purging by `.invalidate`](https://developer.apple.com/documentation/fskit/fsvolume/kernelcachecoherencyaction/invalidate), [cache-state calls outside module locks](https://developer.apple.com/documentation/fskit/fsvolume/setcachestate(for:cachemode:coherencytype:action:)), and [`.revoke` as revoking access and reclaiming the vnode](https://developer.apple.com/documentation/fskit/fsvolume/kernelcachecoherencyaction/revoke). Revoking a live file conflicts with FuseDock's retained-descriptor contract. A new directory layout changes the filesystem interface and needs a separate design decision.
+Apple documents [directory name-cache purging by `.invalidate`](https://developer.apple.com/documentation/fskit/fsvolume/kernelcachecoherencyaction/invalidate), [cache-state calls outside module locks](https://developer.apple.com/documentation/fskit/fsvolume/setcachestate(for:cachemode:coherencytype:action:)), and [`.revoke` as revoking access and reclaiming the vnode](https://developer.apple.com/documentation/fskit/fsvolume/kernelcachecoherencyaction/revoke). The measured revocation behavior above fails simultaneous old/new-revision acceptance while allowing refresh after old descriptors close. A new directory layout changes the filesystem interface and needs a separate design decision.
 
 The remaining root issue is tracked in [the acceptance plan](../TODO.md#platform-isolation-and-native-tests). This report and reproducer are ready for an upstream issue; no report has been submitted to Apple.
