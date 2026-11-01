@@ -1,5 +1,12 @@
 name: fskit-root-probe
-on: workflow_dispatch
+on:
+  workflow_dispatch:
+    inputs:
+      variant:
+        type: choice
+        default: standalone
+        options: [standalone, root-no-cache]
+        description: Standalone cache calls or native adapter with an uncached root
 permissions:
   contents: read
 jobs:
@@ -10,14 +17,21 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version: '1.25.x'
-      - name: Select standalone FSKit probe
+      - name: Select diagnostic variant
+        env:
+          PROBE_VARIANT: ${{ inputs.variant }}
         run: |
-          cp macos/Tests/RootCacheProbe.swift macos/FSKit/FuseDockFSKit/
           python3 - <<'PY'
           from pathlib import Path
-          path = Path('macos/FSKit/FuseDockFSKit/FuseDockFileSystem.swift')
-          source = path.read_text().replace('let volume: FuseDockFSVolume', 'let volume: FSVolume')
-          source = source.replace('volume = try FuseDockCachedFSVolume(configPath: configPath)', 'volume = try RootCacheProbe(configPath: configPath)')
+          import os, shutil
+          if os.environ['PROBE_VARIANT'] == 'standalone':
+              shutil.copy('macos/Tests/RootCacheProbe.swift', 'macos/FSKit/FuseDockFSKit/')
+              path = Path('macos/FSKit/FuseDockFSKit/FuseDockFileSystem.swift')
+              source = path.read_text().replace('let volume: FuseDockFSVolume', 'let volume: FSVolume')
+              source = source.replace('volume = try FuseDockCachedFSVolume(configPath: configPath)', 'volume = try RootCacheProbe(configPath: configPath)')
+          else:
+              path = Path('macos/FSKit/FuseDockFSKit/FuseDockCachedFSVolume.swift')
+              source = path.read_text().replace('cacheMode == .none ? .noCache : .readCache', 'cacheMode == .none || item === rootItem ? .noCache : .readCache')
           path.write_text(source)
           PY
       - run: make macos-bridge
@@ -25,6 +39,6 @@ jobs:
       - run: ditto -c -k --sequesterRsrc --keepParent /tmp/fusedock-probe/Build/Products/Debug/FuseDock.app /tmp/FuseDock-root-probe.zip
       - uses: actions/upload-artifact@v4
         with:
-          name: FuseDock-root-probe
+          name: FuseDock-root-probe-${{ inputs.variant }}
           path: /tmp/FuseDock-root-probe.zip
           retention-days: 7
