@@ -20,9 +20,11 @@ func TestFSKitSnapshotContract(t *testing.T) {
 	if macOSMajor(t) < 27 {
 		t.Skip("active kernel cache invalidation requires macOS 27; macOS 26 uses the remount contract")
 	}
-	nativetest.Run(t, func(ctx context.Context, s provider.Session, path string, ready func()) error {
+	mount := func(ctx context.Context, s provider.Session, path string, ready func()) error {
 		return native.Mount(ctx, s, path, native.Options{ReadOnly: true, EntryTTL: 50 * time.Millisecond, Ready: ready})
-	})
+	}
+	t.Run("root", func(t *testing.T) { nativetest.Run(t, mount) })
+	t.Run("nested", func(t *testing.T) { nativetest.RunNested(t, mount) })
 }
 
 func TestFSKitCompatibilityContract(t *testing.T) {

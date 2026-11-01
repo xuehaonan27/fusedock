@@ -6,7 +6,6 @@ import OSLog
 @available(macOS 27.0, *)
 final class FuseDockCachedFSVolume: FuseDockFSVolume, FSVolume.Handler, FSVolume.ReadWriteHandler, FSVolume.DataCacheHandler {
     private var cacheTimer: DispatchSourceTimer?
-    private var cacheProbePerformed = false
 
     override func startCacheMaintenance() {
         let timer = DispatchSource.makeTimerSource(queue: DispatchQueue(label: "dev.fusedock.fskit.expiry", qos: .utility))
@@ -25,28 +24,14 @@ final class FuseDockCachedFSVolume: FuseDockFSVolume, FSVolume.Handler, FSVolume
     deinit { cacheTimer?.cancel() }
 
     private func expireDirectoryEntries() {
-        if !cacheProbePerformed {
-            cacheProbePerformed = true
-            let observed = itemQueue.sync { Array(items.values) }
-            let pairs: [(FSVolume.DataCacheMode, FSVolume.KernelCacheCoherencyType)] = [
-                (.none, .noCache), (.readWithCache, .noCache), (.readWithCache, .readCache),
-                (.readWriteWithCache, .noCache), (.readWriteWithCache, .readCache)
-            ]
-            for item in observed {
-                for (mode, coherency) in pairs {
-                    let error = setCacheState(for: item, cacheMode: mode, coherencyType: coherency, action: .invalidate)
-                    let code = (error as NSError?)?.code ?? 0
-                    Logger.fusedock.error("cache-probe directory=\(item.object.isDirectory) mode=\(mode.rawValue) coherency=\(coherency.rawValue) result=\(code)")
-                }
-            }
-        }
         // Expiring directory names makes later opens resolve current metadata.
         // This does not poll providers or discard version-bound file blocks.
         let directories = itemQueue.sync { items.values.filter { $0.object.isDirectory } }
         for directory in directories {
             if let error = setCacheState(for: directory, cacheMode: .readWithCache,
                                         coherencyType: .readCache, action: .invalidate) {
-                Logger.fusedock.error("Directory cache expiry failed: \(error.localizedDescription, privacy: .public)")
+                let failure = error as NSError
+                Logger.fusedock.debug("Directory cache expiry failed root=\(directory === self.rootItem) node=\(directory.inode) domain=\(failure.domain, privacy: .public) code=\(failure.code)")
             }
         }
     }
@@ -82,7 +67,6 @@ final class FuseDockCachedFSVolume: FuseDockFSVolume, FSVolume.Handler, FSVolume
         guard let fsItem = item as? FuseDockFSItem else { reply(nil, POSIXError(.EINVAL)); return }
         let coherency: FSVolume.KernelCacheCoherencyType = cacheMode == .none ? .noCache : .readCache
         if fsItem.object.isDirectory {
-            Logger.fusedock.error("cache-probe directory open mode=\(cacheMode.rawValue) granted=\(coherency.rawValue)")
             reply(FSOpenItemResult(grantedCoherency: coherency), nil)
             return
         }

@@ -21,6 +21,7 @@ type remote struct {
 	version  string
 	name     string
 	objectID string
+	nested   bool
 	content  map[string][]byte
 }
 
@@ -28,17 +29,30 @@ func (s *remote) Root(context.Context) (provider.Object, error) {
 	return provider.Object{ID: "root", Name: "fixture", Kind: provider.KindDirectory}, nil
 }
 func (s *remote) object() provider.Object {
-	return provider.Object{ID: s.objectID, ParentID: "root", Name: s.name, Kind: provider.KindFile, Size: int64(len(s.content[s.version])), ContentVersion: s.version, Version: s.version}
+	parent := "root"
+	if s.nested {
+		parent = "nested"
+	}
+	return provider.Object{ID: s.objectID, ParentID: parent, Name: s.name, Kind: provider.KindFile, Size: int64(len(s.content[s.version])), ContentVersion: s.version, Version: s.version}
 }
 func (s *remote) Stat(_ context.Context, o provider.Object) (provider.Object, error) {
 	if o.ID == "root" {
 		return s.Root(context.Background())
 	}
+	if s.nested && o.ID == "nested" {
+		return s.directory(), nil
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.object(), nil
 }
-func (s *remote) List(context.Context, provider.Object) ([]provider.Object, error) {
+func (s *remote) directory() provider.Object {
+	return provider.Object{ID: "nested", ParentID: "root", Name: "nested", Kind: provider.KindDirectory}
+}
+func (s *remote) List(_ context.Context, parent provider.Object) ([]provider.Object, error) {
+	if s.nested && parent.ID == "root" {
+		return []provider.Object{s.directory()}, nil
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return []provider.Object{s.object()}, nil
@@ -74,10 +88,21 @@ func (r *read) ReadAt(ctx context.Context, b []byte, off int64) (int, error) {
 func (r *read) Close() error { return nil }
 func Run(t *testing.T, mount Mount, prepare ...func(string) error) {
 	t.Helper()
+	run(t, mount, false, prepare...)
+}
+
+// RunNested applies the same revision contract to a non-root directory.
+func RunNested(t *testing.T, mount Mount, prepare ...func(string) error) {
+	t.Helper()
+	run(t, mount, true, prepare...)
+}
+
+func run(t *testing.T, mount Mount, nested bool, prepare ...func(string) error) {
+	t.Helper()
 	original := append([]byte("original snapshot"), bytes.Repeat([]byte("A"), 8<<20)...)
 	modified := append([]byte("modified snapshot with a new size"), bytes.Repeat([]byte("B"), 8<<20)...)
 	replaced := bytes.Repeat([]byte("C"), len(modified))
-	base := &remote{version: "v1", name: "file.txt", objectID: "file", content: map[string][]byte{"v1": original, "v2": modified, "v3": replaced}}
+	base := &remote{nested: nested, version: "v1", name: "file.txt", objectID: "file", content: map[string][]byte{"v1": original, "v2": modified, "v3": replaced}}
 	session := vfs.New(base, 0)
 	defer session.Close()
 	point := t.TempDir()
@@ -109,8 +134,12 @@ func Run(t *testing.T, mount Mount, prepare ...func(string) error) {
 	case <-time.After(20 * time.Second):
 		t.Fatal("native mount did not become ready")
 	}
-	path := filepath.Join(point, "file.txt")
-	entries, err := os.ReadDir(point)
+	directory := point
+	if nested {
+		directory = filepath.Join(point, "nested")
+	}
+	path := filepath.Join(directory, "file.txt")
+	entries, err := os.ReadDir(directory)
 	if err != nil || len(entries) != 1 || entries[0].Name() != "file.txt" {
 		t.Fatalf("native directory listing: %v %v", entries, err)
 	}
@@ -183,7 +212,7 @@ func Run(t *testing.T, mount Mount, prepare ...func(string) error) {
 	session.Invalidate("")
 	deadline = time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
-		if _, err := os.Stat(filepath.Join(point, "renamed.txt")); err == nil {
+		if _, err := os.Stat(filepath.Join(directory, "renamed.txt")); err == nil {
 			if _, err := os.Stat(path); errors.Is(err, os.ErrNotExist) {
 				return
 			}
