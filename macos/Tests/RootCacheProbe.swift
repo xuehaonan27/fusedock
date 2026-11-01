@@ -8,11 +8,14 @@ final class RootCacheProbe: FSVolume, FSVolume.Operations, FSVolume.DataCacheHan
     let root: FSItem
     let child: FSItem
     let rootFirst: Bool
+    let rootNoCache: Bool
     var timer: DispatchSourceTimer?
     let logger = Logger(subsystem: "dev.fusedock.root-cache-probe", category: "probe")
 
     init(configPath: String) throws {
-        rootFirst = try String(contentsOfFile: configPath, encoding: .utf8).trimmingCharacters(in: .whitespacesAndNewlines) == "root-first"
+        let config = try String(contentsOfFile: configPath, encoding: .utf8).trimmingCharacters(in: .whitespacesAndNewlines)
+        rootFirst = config != "child-first"
+        rootNoCache = config == "root-no-cache"
         if rootFirst { root = FSItem(); child = FSItem() }
         else { child = FSItem(); root = FSItem() }
         super.init(volumeID: FSVolume.Identifier(uuid: UUID()), volumeName: FSFileName(string: "RootCacheProbe"))
@@ -44,8 +47,10 @@ final class RootCacheProbe: FSVolume, FSVolume.Operations, FSVolume.DataCacheHan
     }
     func probe() {
         for (name, item) in [("root",root), ("child",child)] {
-            let error = setCacheState(for: item, cacheMode: .readWithCache, coherencyType: .readCache, action: .invalidate) as NSError?
-            logger.notice("rootFirst=\(self.rootFirst) item=\(name, privacy: .public) domain=\(error?.domain ?? "none", privacy: .public) code=\(error?.code ?? 0)")
+            for action: FSVolume.KernelCacheCoherencyAction in [.push, .pushInvalidate, .invalidate, .update] {
+                let error = setCacheState(for: item, cacheMode: .readWithCache, coherencyType: self.rootNoCache && item === root ? .noCache : .readCache, action: action) as NSError?
+                logger.notice("rootFirst=\(self.rootFirst) rootNoCache=\(self.rootNoCache) item=\(name, privacy: .public) action=\(action.rawValue) domain=\(error?.domain ?? "none", privacy: .public) code=\(error?.code ?? 0)")
+            }
         }
     }
     func unmount(replyHandler: @escaping () -> Void) { timer?.cancel(); replyHandler() }
@@ -81,11 +86,11 @@ final class RootCacheProbe: FSVolume, FSVolume.Operations, FSVolume.DataCacheHan
     }
     func open(_ item: FSItem, modes: FSVolume.OpenModes, cacheMode: FSVolume.DataCacheMode,
               context: FSContext, replyHandler: @escaping @Sendable (FSOpenItemResult?, Error?) -> Void) {
-        replyHandler(FSOpenItemResult(grantedCoherency: cacheMode == .none ? .noCache : .readCache), nil)
+        replyHandler(FSOpenItemResult(grantedCoherency: cacheMode == .none || (rootNoCache && item === root) ? .noCache : .readCache), nil)
     }
     func upgrade(_ item: FSItem, cacheMode: FSVolume.DataCacheMode, context: FSContext,
                  replyHandler: @escaping @Sendable (FSUpgradeItemResult?, Error?) -> Void) {
-        replyHandler(FSUpgradeItemResult(grantedCoherency: cacheMode == .none ? .noCache : .readCache), nil)
+        replyHandler(FSUpgradeItemResult(grantedCoherency: cacheMode == .none || (rootNoCache && item === root) ? .noCache : .readCache), nil)
     }
     func close(_ item: FSItem, context: FSContext, replyHandler: @escaping @Sendable () -> Void) { replyHandler() }
     func setAttributes(
