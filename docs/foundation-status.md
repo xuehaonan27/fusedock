@@ -57,6 +57,8 @@ The macOS 26 compatibility change at `cc201db` passed [all eleven enabled CI job
 
 The installed SDK 27 artifact and source for `981396a` passed [all eleven enabled CI jobs](https://github.com/xuehaonan27/fusedock/actions/runs/41308754383). Local Go race checks for the FSKit driver, broker, VFS, namespace and daemon also passed after the OS upgrade. macOS native mounting is a separate local check, not covered by those eleven jobs.
 
+The standalone probe and runner at `6a28cdd` passed [all eleven enabled CI jobs](https://github.com/xuehaonan27/fusedock/actions/runs/41315605385). The diagnostic Xcode 27 build succeeded separately. The local runner then collected 40 root cache-state failures and 40 successful child calls across ten mounts. After restoring the normal app, the local native result remained root failed, nested passed, remount refresh passed. Seven extracted test app copies from this investigation were unregistered and removed; the canonical app signature verified and FSClient reported its single registered extension enabled.
+
 ## macOS 27 native findings
 
 The user enabled the installed module through **By Category → File System Extensions**. The **By Application** control reproduced the Team ID error described in [the FSKit toggle investigation](https://github.com/macfuse/macfuse/issues/1194). Subsequent signed app replacements preserved enablement.

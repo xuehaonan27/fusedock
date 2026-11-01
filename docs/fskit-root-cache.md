@@ -30,6 +30,8 @@ Source: [RootCacheProbe.swift](../macos/Tests/RootCacheProbe.swift). It implemen
 | Path URL resource is a file or a directory | `-536870206` | Success |
 | `.push`, `.pushInvalidate`, `.invalidate`, `.update` | `-536870206` for each | Success for each |
 
+The committed runner was exercised against [the diagnostic build of `6a28cdd`](https://github.com/xuehaonan27/fusedock/actions/runs/41315622257): five configurations × two resource types, with eight action results per mount. All 40 root calls returned `-536870206`; all 40 child calls succeeded. The kernel log contained 40 matching `no lifsnode found for fh` messages. The runner returned status 1 and unmounted all ten fixtures. After restoring the normal signed app, `make test-macos` again passed remount refresh and the nested snapshot contract and failed root-level reopen.
+
 A separate build of the ordinary adapter granted `.noCache` only for the root. Its full native contract still failed at root-level reopen and passed in the nested case. The five cache-mode/coherency combinations from the earlier adapter probe also failed only for the root. These diagnostic variants are excluded from normal app builds.
 
 ### Run the reproduction
