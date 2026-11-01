@@ -15,7 +15,9 @@ final class RootCacheProbe: FSVolume, FSVolume.Operations, FSVolume.DataCacheHan
     let logger = Logger(subsystem: "dev.fusedock.root-cache-probe", category: "probe")
 
     init(configPath: String) throws {
-        let config = try String(contentsOfFile: configPath, encoding: .utf8).trimmingCharacters(in: .whitespacesAndNewlines)
+        let resource = URL(fileURLWithPath: configPath)
+        let source = try resource.resourceValues(forKeys: [.isDirectoryKey]).isDirectory == true ? resource.appendingPathComponent("config") : resource
+        let config = try String(contentsOf: source, encoding: .utf8).trimmingCharacters(in: .whitespacesAndNewlines)
         rootFirst = config != "child-first"
         rootNoCache = config == "root-no-cache"
         rootID = config == "root-id-42" ? 42 : 2
