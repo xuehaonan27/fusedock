@@ -1,0 +1,30 @@
+name: fskit-root-probe
+on: workflow_dispatch
+permissions:
+  contents: read
+jobs:
+  build:
+    runs-on: xcode-27
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.25.x'
+      - name: Select standalone FSKit probe
+        run: |
+          cp macos/Tests/RootCacheProbe.swift macos/FSKit/FuseDockFSKit/
+          python3 - <<'PY'
+          from pathlib import Path
+          path = Path('macos/FSKit/FuseDockFSKit/FuseDockFileSystem.swift')
+          source = path.read_text().replace('let volume: FuseDockFSVolume', 'let volume: FSVolume')
+          source = source.replace('volume = try FuseDockCachedFSVolume(configPath: configPath)', 'volume = try RootCacheProbe(configPath: configPath)')
+          path.write_text(source)
+          PY
+      - run: make macos-bridge
+      - run: xcodebuild -project macos/FSKit/FuseDockFSKit.xcodeproj -scheme FuseDock -configuration Debug -derivedDataPath /tmp/fusedock-probe CODE_SIGNING_ALLOWED=NO build
+      - run: ditto -c -k --sequesterRsrc --keepParent /tmp/fusedock-probe/Build/Products/Debug/FuseDock.app /tmp/FuseDock-root-probe.zip
+      - uses: actions/upload-artifact@v4
+        with:
+          name: FuseDock-root-probe
+          path: /tmp/FuseDock-root-probe.zip
+          retention-days: 7
