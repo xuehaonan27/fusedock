@@ -91,6 +91,13 @@ jobs:
       - name: Check SDK routing
         run: ./scripts/check-macos-sdk-routing.sh
       - run: xcodebuild -project macos/FSKit/FuseDockFSKit.xcodeproj -scheme FuseDock -configuration Debug -derivedDataPath /tmp/fusedock-ci CODE_SIGNING_ALLOWED=NO build
+      - name: Package unsigned app for local signing
+        run: ditto -c -k --sequesterRsrc --keepParent /tmp/fusedock-ci/Build/Products/Debug/FuseDock.app /tmp/FuseDock-unsigned.zip
+      - uses: actions/upload-artifact@v4
+        with:
+          name: FuseDock-unsigned-${{ matrix.os }}
+          path: /tmp/FuseDock-unsigned.zip
+          retention-days: 7
   macos-native:
     if: github.event_name == 'workflow_dispatch' && inputs.native_fskit
     runs-on: [self-hosted, macOS, fusedock-fskit]
