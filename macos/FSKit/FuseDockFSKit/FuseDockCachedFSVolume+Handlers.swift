@@ -99,6 +99,7 @@ extension FuseDockCachedFSVolume {
 
     func removeItem(_ item: FSItem, named name: FSFileName, from directory: FSItem, context: FSContext,
                     replyHandler reply: @escaping @Sendable (FSRemoveItemResult?, (any Error)?) -> Void) {
+        guard context.effectiveUserID == Int(getuid()) else { reply(nil, POSIXError(.EACCES)); return }
         do { reply(try commitRemoval(item: item, directory: directory, name: name), nil) }
         catch { reply(nil, error) }
     }
@@ -107,6 +108,7 @@ extension FuseDockCachedFSVolume {
                     to destinationName: FSFileName, inDirectory destinationDirectory: FSItem,
                     overItem: FSItem?, context: FSContext,
                     replyHandler reply: @escaping @Sendable (FSRenameItemResult?, (any Error)?) -> Void) {
+        guard context.effectiveUserID == Int(getuid()) else { reply(nil, POSIXError(.EACCES)); return }
         do {
             reply(try commitPublication(item: item, sourceDirectory: sourceDirectory, sourceName: sourceName,
                 destinationDirectory: destinationDirectory, destinationName: destinationName, overItem: overItem), nil)

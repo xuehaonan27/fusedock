@@ -47,7 +47,8 @@ type ClaimResponse struct {
 }
 
 // PublicationRequest publishes an already prepared local namespace change.
-// Both names are immediate children of this broker's mounted root. This is
+// Names are immediate children of this broker's mounted root. Removal has
+// an empty destination; Directory selects rmdir semantics. This is
 // separate from provider mutation: the remote session remains read-only.
 type PublicationRequest struct {
 	From      string `json:"from"`

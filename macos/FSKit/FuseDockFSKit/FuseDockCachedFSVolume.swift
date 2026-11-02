@@ -33,6 +33,25 @@ final class FuseDockCachedFSVolume: FuseDockFSVolume, FSVolume.Handler, FSVolume
 
     deinit { cacheTimer?.cancel() }
 
+    override func reclaimItem(_ item: FSItem, replyHandler: @escaping (Error?) -> Void) {
+        guard bridge.canPublishNamespace, let file = item as? FuseDockFSItem,
+              file.object.parentID == rootItem.object.id else {
+            super.reclaimItem(item, replyHandler: replyHandler)
+            return
+        }
+        // Root lookup returns its FSItem under this same lock. FSKit decides
+        // whether a racing lookup has made the kernel's reclaim obsolete.
+        publicationLock.lock()
+        _ = file.tryReclaim {
+            self.closeRead(file)
+            self.itemQueue.sync {
+                if self.items[file.object.id] === file { self.items.removeValue(forKey: file.object.id) }
+            }
+        }
+        publicationLock.unlock()
+        replyHandler(nil)
+    }
+
     private func expireDirectoryEntries() {
         if bridge.canPublishNamespace {
             do { try refreshRoot() }

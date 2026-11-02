@@ -14,7 +14,7 @@ import (
 
 // ConfigurePublication binds the publisher to the FSKit resource supplied by
 // the host, never to a path supplied over RPC. The extension authorizes each
-// rename against a single pending publication; ordinary writes still fail.
+// operation against a single pending publication; ordinary writes still fail.
 func ConfigurePublication(server *broker.Server, resource string) error {
 	absolute, err := filepath.Abs(resource)
 	if err != nil {

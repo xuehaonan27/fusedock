@@ -17,7 +17,8 @@ struct FuseDockRootPublication {
 extension FuseDockCachedFSVolume {
     static func sameContent(_ a: FuseDockObject, _ b: FuseDockObject) -> Bool {
         a.id == b.id && a.kind == b.kind && a.size == b.size &&
-            a.contentVersion == b.contentVersion && a.version == b.version
+            a.contentVersion == b.contentVersion && a.version == b.version &&
+            a.modified == b.modified && a.created == b.created
     }
 
     // Metadata is the published namespace; reclaim can release an FSItem
@@ -49,13 +50,21 @@ extension FuseDockCachedFSVolume {
     func refreshRoot() throws {
         let observed = try bridge.list(parentID: rootItem.object.id)
         let desired = Dictionary(uniqueKeysWithValues: observed.map { ($0.name, $0) })
+        let oldNames = Dictionary(grouping: rootObjects(), by: { $0.id })
         for object in observed {
             publicationLock.lock()
             let current = publishedRoot[object.name]
-            let moved = publishedRoot.values.first { $0.id == object.id && $0.name != object.name && Self.sameContent($0, object) }
+            let moved = oldNames[object.id]?.first {
+                $0.name != object.name && Self.sameContent($0, object) &&
+                    publishedRoot[$0.name].map { Self.sameContent($0, object) } == true
+            }
+            if let current, current.id == object.id && current.isDirectory && object.isDirectory {
+                publishedRoot[object.name] = object
+                publicationLock.unlock()
+                continue
+            }
             publicationLock.unlock()
-            if let current, Self.sameContent(current, object) ||
-                (current.id == object.id && current.isDirectory && object.isDirectory) { continue }
+            if let current, Self.sameContent(current, object) { continue }
             // A file/directory type change requires removing the former type.
             if let current, current.isDirectory != object.isDirectory {
                 try publishRoot(current, from: current.name, removed: true)

@@ -9,6 +9,7 @@ import shutil
 import subprocess
 import tempfile
 import time
+import threading
 from concurrent.futures import ThreadPoolExecutor
 
 
@@ -52,12 +53,23 @@ def exercise_publication(paths, resource, log_path, first):
     third = {}
     try:
         publish(resource, log_path, 3, "replace")
+        first_open = threading.Barrier(3)
+        committed = threading.Event()
         def reopens(path):
-            return [open_view(path) for _ in range(40)]
+            views = [open_view(path)]
+            first_open.wait(timeout=10)
+            for _ in range(40):
+                views.append(open_view(path))
+                time.sleep(0.002)
+            committed.wait(timeout=10)
+            views.append(open_view(path))
+            return views
         with ThreadPoolExecutor(max_workers=2) as pool:
             readers = {name: pool.submit(reopens, path) for name, path in paths.items()}
+            first_open.wait(timeout=10)
             for path in paths.values():
                 os.replace(path.with_name("staged-3.txt"), path)
+            committed.set()
             concurrent = {name: future.result() for name, future in readers.items()}
         same_size = {name: open_view(path) for name, path in paths.items()}
         for name, path in paths.items():
@@ -76,6 +88,7 @@ def exercise_publication(paths, resource, log_path, first):
         passed = all(
             same_size[name] == renamed[name] == expected[3]
             and all(view in (expected[2], expected[3]) for view in concurrent[name])
+            and {view.get("prefix") for view in concurrent[name]} == {"BBBB", "CCCC"}
             and all(result[name].get("errno") == errno.ENOENT for result in (negative, removed_names, deleted))
             and all(retained[str(rev)][name] == expected[rev] for rev in (1, 2, 3))
             for name in paths)
