@@ -257,6 +257,10 @@ func (c *anyShareClient) stat(ctx context.Context, entry pkuEntry) (pkuEntry, er
 }
 
 func (c *anyShareClient) readAt(ctx context.Context, entry pkuEntry, dest []byte, off int64) (int, error) {
+	return c.readAtProgress(ctx, entry, dest, off, nil)
+}
+
+func (c *anyShareClient) readAtProgress(ctx context.Context, entry pkuEntry, dest []byte, off int64, publish func(int)) (int, error) {
 	if off < 0 {
 		return 0, errors.New("negative read offset")
 	}
@@ -282,7 +286,7 @@ func (c *anyShareClient) readAt(ctx context.Context, entry pkuEntry, dest []byte
 		return 0, err
 	}
 	defer resp.Body.Close()
-	return providerhttp.ReadResponse(resp, dest[:length], off, entry.Size, "")
+	return providerhttp.ReadResponseProgress(resp, dest[:length], off, entry.Size, "", publish)
 }
 
 func (c *anyShareClient) signedRequest(ctx context.Context, signed []string, headers http.Header) (*http.Response, error) {

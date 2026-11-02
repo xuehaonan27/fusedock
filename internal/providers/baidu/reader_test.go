@@ -167,3 +167,30 @@ func TestProgressiveReadRejectsHeadersBeforePublishing(t *testing.T) {
 		})
 	}
 }
+
+func TestTinySequentialHeadersDoNotGrowLargePrefetch(t *testing.T) {
+	const size = int64(8 << 20)
+	var requested atomic.Int64
+	c, _ := rangeClient(t, func(w http.ResponseWriter, r *http.Request) {
+		_, n := replyRange(w, r, size)
+		requested.Add(n)
+		w.Write(make([]byte, n))
+	})
+	raw := &Session{client: c, known: map[string]meta{"42": {ID: "42", Size: size}}}
+	s := vfs.New(raw, 0)
+	defer s.Close()
+	r, err := s.OpenRead(context.Background(), provider.Object{ID: "42", Kind: provider.KindFile, Size: size})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for off := int64(0); off < 1024; off += 8 {
+		if _, err := r.ReadAt(context.Background(), make([]byte, 8), off); err != nil {
+			r.Close()
+			t.Fatal(err)
+		}
+	}
+	r.Close()
+	if n := requested.Load(); n > 128<<10 {
+		t.Fatalf("1 KiB of tiny header reads fetched %d bytes", n)
+	}
+}

@@ -8,12 +8,12 @@ import (
 const initialReadAhead = int64(64 << 10)
 
 type readAhead struct {
-	mu                  sync.Mutex
-	seen                bool
-	end, window, target int64
-	cancel              context.CancelFunc
-	done                chan struct{}
-	workers             sync.WaitGroup
+	mu                            sync.Mutex
+	seen                          bool
+	end, window, target, consumed int64
+	cancel                        context.CancelFunc
+	done                          chan struct{}
+	workers                       sync.WaitGroup
 }
 
 func (r *reader) observeRead(off, end int64) bool {
@@ -22,9 +22,18 @@ func (r *reader) observeRead(off, end int64) bool {
 	defer a.mu.Unlock()
 	sequential := a.seen && off == a.end
 	if sequential {
-		a.window = min(defaultReadBlock, max(initialReadAhead, max(end-off, a.window*2)))
+		a.consumed += end - off
+		if a.window == 0 {
+			a.window = min(defaultReadBlock, max(initialReadAhead, end-off))
+		} else {
+			// Grow with bytes consumed, not callback count: repeated tiny
+			// header reads keep a small window. Four times consumption gives
+			// sequential streams enough lead to amortize request latency.
+			a.window = max(initialReadAhead, min(a.consumed, defaultReadBlock/4)*4)
+		}
 	} else {
 		a.window = 0
+		a.consumed = 0
 		if a.cancel != nil {
 			a.cancel()
 			a.cancel = nil

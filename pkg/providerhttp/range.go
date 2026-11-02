@@ -44,6 +44,12 @@ func Prepare(req *http.Request, offset, length int64, etag string) error {
 // ReadResponse validates the original snapshot, including complete body length.
 // etag is empty only for reads already bound by a provider-native revision.
 func ReadResponse(resp *http.Response, dest []byte, offset, size int64, etag string) (int, error) {
+	return ReadResponseProgress(resp, dest, offset, size, etag, nil)
+}
+
+// ReadResponseProgress exposes immutable prefixes after the response headers
+// prove the selected range/revision. Final bytes wait for body-length validation.
+func ReadResponseProgress(resp *http.Response, dest []byte, offset, size int64, etag string, publish func(int)) (int, error) {
 	conflict := func(reason string) (int, error) { return 0, fmt.Errorf("%w: %s", provider.ErrConflict, reason) }
 	length := int64(len(dest))
 	if offset < 0 || length <= 0 || offset > size || length > size-offset {
@@ -75,13 +81,27 @@ func ReadResponse(resp *http.Response, dest []byte, offset, size int64, etag str
 	if resp.ContentLength >= 0 && resp.ContentLength != length {
 		return conflict("response length differs from snapshot")
 	}
-	n, err := io.ReadFull(resp.Body, dest)
-	if err != nil {
-		return n, err
+	n := 0
+	for n < len(dest) {
+		end := len(dest)
+		if publish != nil {
+			end = min(end, n+(32<<10))
+		}
+		count, err := io.ReadFull(resp.Body, dest[n:end])
+		n += count
+		if err != nil {
+			return n, err
+		}
+		if publish != nil && n < len(dest) {
+			publish(n)
+		}
 	}
 	var extra [1]byte
 	if count, err := io.ReadFull(resp.Body, extra[:]); count != 0 || err != io.EOF {
 		return conflict("response has extra bytes")
+	}
+	if publish != nil {
+		publish(n)
 	}
 	return n, nil
 }

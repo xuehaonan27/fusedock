@@ -9,7 +9,7 @@ Updated 2026-11-02. [TODO.md](../TODO.md) remains the complete acceptance plan. 
 | Accounts | New bindings have random AccountID, stable CredentialRef, normalized binding fingerprints, identity-preserving credential rotation and alias rename, and binding-checked refresh persistence. Existing account records are unchanged. |
 | Namespace | Account/provider/object keys, resolved scope roots, target revocation, deterministic volume IDs, sequential collision-free inode allocation. |
 | Read contract | ContentVersion and MetadataVersion, session capability negotiation, explicit immutable revision reads, optional whole-object declared-digest verification. |
-| PKU | Each exact read and signed-URL renewal carries the original revision. Fixtures verify renewal, strict range responses, and missing-revision conflicts. |
+| PKU | Each exact read and signed-URL renewal carries the original revision. Validated range responses support progressive prefix delivery. Fixtures verify renewal, strict range responses, and missing-revision conflicts. |
 | Baidu | Current-content reads, progressive HTTP range delivery, per-reader download-link reuse/renewal, and fresh metadata; canonical declared MD5 is represented in object metadata. Declared-digest persistence is disabled pending modification, duplicate-content, and concurrent-change qualification. |
 | Cache | Shared blocks with independently available immutable intervals, demand-sized fetches, bounded adaptive read-ahead, independent cancellation of coalesced fills, memory reservations, byte-based 2Q, bounded ghost history, correlated-read accounting, pinned leases, asynchronous complete-block persistence, restart hits, corruption removal/refill, background stat-only scanning. |
 | Disk storage | One-owner lock, private directories, namespace-separated paths, root-relative publication, header/key/size/payload checks, platform file checks, clear/prune/verify. |
@@ -112,10 +112,10 @@ On 2026-11-02, the local macOS 27.2 native suite passed with the demand-range ca
 
 | Workload | Delivery | Time/op | Remote bytes/op | Data GETs/op | dlink calls/op |
 | --- | --- | ---: | ---: | ---: | ---: |
-| First 32 KiB | 4 MiB fill baseline | 151.27 ms | 4,194,304 | 1 | 1 |
-| First 32 KiB | Demand range | 2.28 ms | 32,768 | 1 | 1 |
-| Sequential 4 MiB | 4 MiB fill baseline | 151.07 ms | 4,194,304 | 1 | 1 |
-| Sequential 4 MiB | Demand + adaptive prefetch | 151.80 ms | 4,194,304 | 7.33 | 1 |
+| First 32 KiB | 4 MiB fill baseline | 149.34 ms | 4,194,304 | 1 | 1 |
+| First 32 KiB | Demand range | 2.34 ms | 32,768 | 1 | 1 |
+| Sequential 4 MiB | 4 MiB fill baseline | 148.98 ms | 4,194,304 | 1 | 1 |
+| Sequential 4 MiB | Demand + adaptive prefetch | 148.87 ms | 4,194,304 | 10 | 1 |
 
 The first-read transfer falls by 128 times in this workload. Sequential transfer size stays constant; additional requests are the cost of early delivery and adaptive read-ahead. The fixture has local request latency, so real WAN round-trip costs require a separate measurement. Run it with:
 

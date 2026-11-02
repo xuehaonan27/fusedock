@@ -214,6 +214,10 @@ func (r *reader) ReadAt(ctx context.Context, dest []byte, off int64) (int, error
 	return r.client.readAt(ctx, r.entry, dest, off)
 }
 
+func (r *reader) ReadAtProgress(ctx context.Context, dest []byte, off int64, publish func(int)) (int, error) {
+	return r.client.readAtProgress(ctx, r.entry, dest, off, publish)
+}
+
 func (r *reader) Close() error { return nil }
 
 func fromEntry(entry pkuEntry, parent string) provider.Object {
