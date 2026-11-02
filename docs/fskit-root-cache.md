@@ -24,6 +24,10 @@ The initial atomic-replacement probe passed old-A/new-B reads, including size an
 
 The normal adapter passed the original, unchanged root snapshot acceptance. Additional native tests passed file and directory creation, negative-cache refresh, remote rename, same-size local-provider replacement, removal with an open old reader, directory-to-file replacement, and enumeration without internal names. User create, mkdir, rename, unlink and a forged publication-name rename were rejected.
 
+Final code `820e3b4` passed [CI](https://github.com/xuehaonan27/fusedock/actions/runs/41402004993) and the full native suite after local signing. The directory-type regression holds the old directory descriptor while its remote path becomes a file. Root-child attributes come from the published item: directly statting the new provider path into the old directory vnode produced the kernel error `Unexpected attribute type changed from 2 to 1`. Keeping the presented type until native replacement completes fixes that race. The retained directory descriptor continues to report a directory, while new opens resolve the file.
+
+The concurrent standalone publication run issued 42 opens at the root and 42 in the child directory across B→C. Each location observed both B and C, with no mixed contents or failed opens. All retained A/B/C descriptors preserved their bytes, size and EOF after rename and unlink. Run this case with `python3 scripts/probe-macos-read-cache.py --action replace --output <new-directory>` using the `read-content` diagnostic build.
+
 ### Authorization and filesystem behavior
 
 - The broker advertises publication capability only when the host binds it to a resource. The RPC uses the existing authenticated session and browser-origin rejection. Requests contain immediate child names, never a caller-selected mount path.

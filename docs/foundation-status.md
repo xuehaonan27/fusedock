@@ -63,6 +63,8 @@ The standalone probe and runner at `6a28cdd` passed [all eleven enabled CI jobs]
 
 The root publication implementation at `566631d` passed [all eleven enabled CI jobs](https://github.com/xuehaonan27/fusedock/actions/runs/41400083412), including Linux/Windows native mounting and both SDK app builds. After signing and installing that app locally, the original root and nested snapshot tests both passed. The separate root publication test then passed creation, negative-cache refresh, rename, same-size replacement, deletion with a retained old descriptor, directory-to-file replacement and clean enumeration.
 
+Final application code `820e3b4` passed [all eleven enabled CI jobs](https://github.com/xuehaonan27/fusedock/actions/runs/41402004993). Its signed app passed the complete local `make test-macos` suite, including the strengthened directory-to-file test with an old directory descriptor retained. Published root children now retain their presented type through replacement; a direct Stat of the already replaced provider path must not change an existing vnode's type. The host-confinement test verifies that even an authenticated publication cannot rename or unlink files in an unmounted host directory. `go test -race ./...` passed locally. The standalone publication probe also passed 42 opens per directory across B→C, observing both revisions while retained A/B/C descriptors stayed valid.
+
 The user enabled the installed module through **By Category → File System Extensions**. The **By Application** control reproduced the Team ID error described in [the FSKit toggle investigation](https://github.com/macfuse/macfuse/issues/1194). Subsequent signed app replacements preserved enablement.
 
 | Local native check | Observed result on macOS 27.2 |

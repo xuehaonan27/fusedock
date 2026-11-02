@@ -100,6 +100,11 @@ func TestFSKitRootNamespacePublication(t *testing.T) {
 		t.Fatal(err)
 	}
 	waitFor("new directory did not appear", func() bool { info, err := os.Stat(filepath.Join(point, "folder")); return err == nil && info.IsDir() })
+	oldDirectory, err := os.Open(filepath.Join(point, "folder"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer oldDirectory.Close()
 	if !absent("renamed.txt") {
 		t.Fatal("rename destination already exists")
 	}
@@ -136,6 +141,9 @@ func TestFSKitRootNamespacePublication(t *testing.T) {
 	}
 	write("folder", []byte("now a file"))
 	waitFor("directory-to-file replacement failed", func() bool { return content("folder", "now a file") })
+	if info, err := oldDirectory.Stat(); err != nil || !info.IsDir() {
+		t.Fatalf("retained directory changed its type: %v %v", info, err)
+	}
 	waitFor("directory contains stale or internal names", func() bool {
 		entries, err := os.ReadDir(point)
 		if err != nil {
