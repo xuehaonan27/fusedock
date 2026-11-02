@@ -60,6 +60,9 @@ extension FuseDockCachedFSVolume {
             }
             if let current, current.id == object.id && current.isDirectory && object.isDirectory {
                 publishedRoot[object.name] = object
+                itemQueue.sync {
+                    if let item = items[object.id], item.object.isDirectory { item.object = object }
+                }
                 publicationLock.unlock()
                 continue
             }

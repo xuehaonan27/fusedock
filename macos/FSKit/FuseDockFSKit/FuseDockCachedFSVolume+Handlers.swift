@@ -39,6 +39,17 @@ extension FuseDockCachedFSVolume {
                        replyHandler reply: @escaping @Sendable (FSGetAttributesResult?, (any Error)?) -> Void) {
         let request = FSItem.GetAttributesRequest()
         request.wantedAttributes = desired.wantedAttributes.union(FSGetAttributesResult.requestedAttributes.wantedAttributes)
+        if bridge.canPublishNamespace, let child = item as? FuseDockFSItem,
+           child.object.parentID == rootItem.object.id {
+            child.readLock.lock()
+            defer { child.readLock.unlock() }
+            // A remote path may now name a different type. The old vnode keeps
+            // its published attributes until native rename/remove replaces it.
+            let attrs = attributes(for: child.object, desired: request)
+            let result = FSGetAttributesResult(attributes: attrs)
+            reply(result, result == nil ? POSIXError(.EIO) : nil)
+            return
+        }
         readAttributes(request, of: item) { attrs, error in
             guard let attrs else { reply(nil, error); return }
             if self.bridge.canPublishNamespace && item === self.rootItem { attrs.mode = 0o755 }
