@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Compare file bytes and callbacks using the read-content diagnostic app."""
 import argparse
+import errno
 import json
 import os
 from pathlib import Path
@@ -8,6 +9,7 @@ import shutil
 import subprocess
 import tempfile
 import time
+from concurrent.futures import ThreadPoolExecutor
 
 
 def observe(fd):
@@ -32,6 +34,65 @@ def open_view(path):
         os.close(fd)
 
 
+def publish(resource, log_path, revision, action):
+    staged = resource / "state.new"
+    staged.write_text(f"{revision} {action}\n")
+    staged.replace(resource / "state")
+    marker = f"probe={resource.name} event=published revision={revision} action={action}"
+    deadline = time.monotonic() + 8
+    while marker not in log_path.read_text():
+        if time.monotonic() > deadline:
+            raise RuntimeError(f"The probe did not publish revision {revision}")
+        time.sleep(0.05)
+
+
+def exercise_publication(paths, resource, log_path, first):
+    """Retain three revisions across replacement, rename, and unlink."""
+    second = {name: os.open(path, os.O_RDONLY) for name, path in paths.items()}
+    third = {}
+    try:
+        publish(resource, log_path, 3, "replace")
+        def reopens(path):
+            return [open_view(path) for _ in range(40)]
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            readers = {name: pool.submit(reopens, path) for name, path in paths.items()}
+            for path in paths.values():
+                os.replace(path.with_name("staged-3.txt"), path)
+            concurrent = {name: future.result() for name, future in readers.items()}
+        same_size = {name: open_view(path) for name, path in paths.items()}
+        for name, path in paths.items():
+            third[name] = os.open(path, os.O_RDONLY)
+        negative = {name: open_view(path.with_name("moved.txt")) for name, path in paths.items()}
+        for path in paths.values():
+            os.rename(path, path.with_name("moved.txt"))
+        renamed = {name: open_view(path.with_name("moved.txt")) for name, path in paths.items()}
+        removed_names = {name: open_view(path) for name, path in paths.items()}
+        for path in paths.values():
+            path.with_name("moved.txt").unlink()
+        deleted = {name: open_view(path.with_name("moved.txt")) for name, path in paths.items()}
+        retained = {str(rev): {name: observe(fd) for name, fd in handles.items()}
+                    for rev, handles in ((1, first), (2, second), (3, third))}
+        expected = {rev: expected_view(rev) for rev in (1, 2, 3)}
+        passed = all(
+            same_size[name] == renamed[name] == expected[3]
+            and all(view in (expected[2], expected[3]) for view in concurrent[name])
+            and all(result[name].get("errno") == errno.ENOENT for result in (negative, removed_names, deleted))
+            and all(retained[str(rev)][name] == expected[rev] for rev in (1, 2, 3))
+            for name in paths)
+        return {"same_size": same_size, "concurrent_opens": concurrent, "renamed": renamed,
+                "negative_before": negative, "old_names_after_rename": removed_names,
+                "after_unlink": deleted, "retained_after_unlink": retained, "passed": passed}
+    finally:
+        for fd in [*second.values(), *third.values()]:
+            os.close(fd)
+
+
+def expected_view(revision):
+    byte = chr(64 + revision)
+    return {"size": (8 << 20) + (17 if revision == 1 else 32), "prefix": byte * 4,
+            "uncached": byte * 4, "eof": "", "old_eof": "" if revision == 1 else byte}
+
+
 def run_case(output, log_path, action):
     task = Path(tempfile.mkdtemp(prefix=action + "-", dir=output))
     resource = task / task.name
@@ -49,34 +110,28 @@ def run_case(output, log_path, action):
             old[name] = os.open(path, os.O_RDONLY)
             initial[name] = {"prefix": os.pread(old[name], 4, 0).decode(), "size": os.fstat(old[name]).st_size}
             assert initial[name] == {"prefix": "AAAA", "size": (8 << 20) + 17}, initial
-        staged = resource / "state.new"
-        staged.write_text(f"2 {action}\n")
-        staged.replace(resource / "state")
-        marker = f"probe={resource.name} event=published revision=2 action={action}"
-        deadline = time.monotonic() + 8
-        while marker not in log_path.read_text():
-            if time.monotonic() > deadline:
-                raise RuntimeError("The probe did not publish revision 2")
-            time.sleep(0.05)
+        publish(resource, log_path, 2, action)
         # All cache actions have completed before these opens.
         if action == "replace":
             for path in paths.values():
-                os.replace(path.with_name("staged.txt"), path)
+                os.replace(path.with_name("staged-2.txt"), path)
         new = {name: open_view(path) for name, path in paths.items()}
         retained = {name: observe(fd) for name, fd in old.items()}
         fresh = {name: open_view(path.with_name("fresh.txt")) for name, path in paths.items()}
         retained_after_fresh = {name: observe(fd) for name, fd in old.items()}
+        publication = exercise_publication(paths, resource, log_path, old) if action == "replace" else None
         for fd in old.values():
             os.close(fd)
         old.clear()
         after_close = {name: open_view(path) for name, path in paths.items()}
         deadline = time.monotonic() + 2
-        while any(view.get("prefix") != "BBBB" for view in after_close.values()) and time.monotonic() < deadline:
+        while action != "replace" and any(view.get("prefix") != "BBBB" for view in after_close.values()) and time.monotonic() < deadline:
             time.sleep(0.05)
             after_close = {name: open_view(path) for name, path in paths.items()}
         result = {"action": action, "probe_id": resource.name, "initial": initial,
                   "reopened": new, "retained": retained, "fresh_name": fresh,
-                  "retained_after_fresh": retained_after_fresh, "after_close": after_close}
+                  "retained_after_fresh": retained_after_fresh, "after_close": after_close,
+                  "publication": publication}
         print(json.dumps(result, indent=2), flush=True)
         return result
     finally:
@@ -109,13 +164,12 @@ def main():
             stream.wait(timeout=10)
             (output / "result.json").write_text(json.dumps(results, indent=2) + "\n")
     # Compare complete byte/size/EOF observations, including the retained readers.
-    expected_old = {"size": (8 << 20) + 17, "prefix": "AAAA", "uncached": "AAAA", "eof": "", "old_eof": ""}
-    expected_new = {"size": (8 << 20) + 32, "prefix": "BBBB", "uncached": "BBBB", "eof": "", "old_eof": "B"}
+    expected_old, expected_new = expected_view(1), expected_view(2)
     for result in results:
         result["snapshot_contract"] = all(
             result["reopened"][parent] == expected_new and result["retained"][parent] == expected_old
             and result["retained_after_fresh"][parent] == expected_old
-            for parent in ("root", "child"))
+            for parent in ("root", "child")) and (result["publication"] is None or result["publication"]["passed"])
     (output / "result.json").write_text(json.dumps(results, indent=2) + "\n")
     return 0 if all(result["snapshot_contract"] for result in results) else 1
 

@@ -59,7 +59,7 @@ final class ReadCacheProbe: RootCacheProbe, FSVolume.ReadWriteOperations {
             let old = [files["false-\(revision)"]!, files["true-\(revision)"]!]
             revision = next
             if publicationMode {
-                for nested in [false, true] { entries["\(nested)/staged.txt"] = files["\(nested)-\(next)"]! }
+                for nested in [false, true] { entries["\(nested)/staged-\(next).txt"] = files["\(nested)-\(next)"]! }
             }
             return old
         }
