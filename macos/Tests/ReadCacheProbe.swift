@@ -20,18 +20,23 @@ final class ReadProbeItem: FSItem {
 @available(macOS 27.0, *)
 final class ReadCacheProbe: RootCacheProbe, FSVolume.ReadWriteOperations {
     let controlURL: URL
+    let publicationMode: Bool
     private let stateQueue = DispatchQueue(label: "read-cache-probe.state")
     private var revision = 1
     private var files: [String: ReadProbeItem] = [:]
+    private var entries: [String: ReadProbeItem] = [:]
 
     override init(configPath: String) throws {
         controlURL = URL(fileURLWithPath: configPath).appendingPathComponent("state")
+        publicationMode = try String(contentsOf: URL(fileURLWithPath: configPath).appendingPathComponent("config"),
+                                     encoding: .utf8).trimmingCharacters(in: .whitespacesAndNewlines) == "atomic-replace"
         try super.init(configPath: configPath)
         for revision in 1...3 {
             for nested in [false, true] {
                 files["\(nested)-\(revision)"] = ReadProbeItem(revision: revision, nested: nested)
             }
         }
+        for nested in [false, true] { entries["\(nested)/file.txt"] = files["\(nested)-1"]! }
     }
 
     private func currentFile(nested: Bool) -> ReadProbeItem {
@@ -53,6 +58,9 @@ final class ReadCacheProbe: RootCacheProbe, FSVolume.ReadWriteOperations {
             if revision == next { return [] }
             let old = [files["false-\(revision)"]!, files["true-\(revision)"]!]
             revision = next
+            if publicationMode {
+                for nested in [false, true] { entries["\(nested)/staged.txt"] = files["\(nested)-\(next)"]! }
+            }
             return old
         }
         if old.isEmpty { return }
@@ -71,7 +79,11 @@ final class ReadCacheProbe: RootCacheProbe, FSVolume.ReadWriteOperations {
     }
 
     override func attrs(_ item: FSItem) -> FSItem.Attributes {
-        guard let file = item as? ReadProbeItem else { return super.attrs(item) }
+        guard let file = item as? ReadProbeItem else {
+            let a = super.attrs(item)
+            if publicationMode { a.mode = 0o755 }
+            return a
+        }
         let a = super.attrs(item)
         a.type = .file; a.mode = 0o444
         a.size = UInt64(file.size); a.allocSize = a.size
@@ -83,6 +95,12 @@ final class ReadCacheProbe: RootCacheProbe, FSVolume.ReadWriteOperations {
 
     override func lookupItem(named name: FSFileName, inDirectory directory: FSItem,
                              replyHandler: @escaping (FSItem?, FSFileName?, Error?) -> Void) {
+        if publicationMode, name.string != "fresh.txt", name.string != "child" {
+            let file = stateQueue.sync { entries["\(directory === child)/\(name.string ?? "")"] }
+            if let file { trace("lookup", item: file, detail: "name=\(name.string ?? "")") }
+            replyHandler(file, file == nil ? nil : name, file == nil ? POSIXError(.ENOENT) : nil)
+            return
+        }
         if name.string == "file.txt" || name.string == "fresh.txt" {
             let file = currentFile(nested: directory === child)
             trace("lookup", item: file, detail: "name=\(name.string ?? "")")
@@ -97,14 +115,48 @@ final class ReadCacheProbe: RootCacheProbe, FSVolume.ReadWriteOperations {
                                      packer: FSDirectoryEntryPacker,
                                      replyHandler: @escaping (FSDirectoryVerifier, Error?) -> Void) {
         let file = currentFile(nested: directory === child)
-        let entries: [(String, FSItem)] = directory === root ? [("child", child), ("file.txt", file)] : [("file.txt", file)]
-        for (index, entry) in entries.enumerated() where index >= Int(cookie.rawValue) {
+        var listing: [(String, FSItem)] = directory === root ? [("child", child), ("file.txt", file)] : [("file.txt", file)]
+        if publicationMode {
+            let prefix = "\(directory === child)/"
+            listing = stateQueue.sync { entries.filter { $0.key.hasPrefix(prefix) }
+                .map { (String($0.key.dropFirst(prefix.count)), $0.value as FSItem) }.sorted { $0.0 < $1.0 } }
+            if directory === root { listing.insert(("child", child), at: 0) }
+        }
+        for (index, entry) in listing.enumerated() where index >= Int(cookie.rawValue) {
             let a = attrs(entry.1)
             if !packer.packEntry(name: FSFileName(string: entry.0), itemType: a.type, itemID: a.fileID,
                                  nextCookie: FSDirectoryCookie(UInt64(index + 1)),
                                  attributes: attributes == nil ? nil : a) { break }
         }
         replyHandler(FSDirectoryVerifier(0), nil)
+    }
+
+    override func renameItem(_ item: FSItem, inDirectory sourceDirectory: FSItem, named sourceName: FSFileName,
+                             to destinationName: FSFileName, inDirectory destinationDirectory: FSItem,
+                             overItem: FSItem?, replyHandler: @escaping (FSFileName?, Error?) -> Void) {
+        guard publicationMode else { replyHandler(nil, POSIXError(.EROFS)); return }
+        let error: Error? = stateQueue.sync {
+            let source = "\(sourceDirectory === child)/\(sourceName.string ?? "")"
+            let destination = "\(destinationDirectory === child)/\(destinationName.string ?? "")"
+            guard entries[source] === item else { return POSIXError(.ENOENT) }
+            entries[destination] = entries.removeValue(forKey: source)
+            return nil
+        }
+        trace("rename", item: item, detail: "from=\(sourceName.string ?? "") to=\(destinationName.string ?? "") code=\((error as NSError?)?.code ?? 0)")
+        replyHandler(error == nil ? destinationName : nil, error)
+    }
+
+    override func removeItem(_ item: FSItem, named name: FSFileName, fromDirectory directory: FSItem,
+                             replyHandler: @escaping (Error?) -> Void) {
+        guard publicationMode else { replyHandler(POSIXError(.EROFS)); return }
+        let error: Error? = stateQueue.sync {
+            let key = "\(directory === child)/\(name.string ?? "")"
+            guard entries[key] === item else { return POSIXError(.ENOENT) }
+            entries.removeValue(forKey: key)
+            return nil
+        }
+        trace("remove", item: item, detail: "name=\(name.string ?? "")")
+        replyHandler(error)
     }
 
     override func open(_ item: FSItem, modes: FSVolume.OpenModes, cacheMode: FSVolume.DataCacheMode,

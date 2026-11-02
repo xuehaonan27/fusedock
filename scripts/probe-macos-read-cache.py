@@ -36,7 +36,7 @@ def run_case(output, log_path, action):
     task = Path(tempfile.mkdtemp(prefix=action + "-", dir=output))
     resource = task / task.name
     resource.mkdir(mode=0o700)
-    (resource / "config").write_text("root-first\n")
+    (resource / "config").write_text("atomic-replace\n" if action == "replace" else "root-first\n")
     (resource / "state").write_text("1 none\n")
     point = task / "mount"
     point.mkdir()
@@ -59,6 +59,9 @@ def run_case(output, log_path, action):
                 raise RuntimeError("The probe did not publish revision 2")
             time.sleep(0.05)
         # All cache actions have completed before these opens.
+        if action == "replace":
+            for path in paths.values():
+                os.replace(path.with_name("staged.txt"), path)
         new = {name: open_view(path) for name, path in paths.items()}
         retained = {name: observe(fd) for name, fd in old.items()}
         fresh = {name: open_view(path.with_name("fresh.txt")) for name, path in paths.items()}
@@ -87,7 +90,7 @@ def run_case(output, log_path, action):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output", type=Path, required=True, help="New directory for logs and JSON")
-    parser.add_argument("--action", action="append", choices=("none", "directory", "file", "revoke"))
+    parser.add_argument("--action", action="append", choices=("none", "directory", "file", "revoke", "replace"))
     args = parser.parse_args()
     output = args.output.resolve()
     output.mkdir(parents=True)
