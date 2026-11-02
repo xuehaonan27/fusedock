@@ -5,7 +5,7 @@ struct ContentView: View {
     private var cacheRefreshDescription: String {
         #if FUSEDOCK_FSKIT27
         if #available(macOS 27.0, *) {
-            return "Remote changes to files directly in the mounted root currently require unmounting and mounting again."
+            return "Remote changes refresh automatically. Files already open keep their selected content until you close them."
         }
         #endif
         return "To refresh files changed remotely, unmount and mount the account again."

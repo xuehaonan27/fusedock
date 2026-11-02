@@ -36,11 +36,13 @@ No macFUSE installation is needed.
 | --- | --- | --- |
 | Xcode 26 build on macOS 26+ | `OpenCloseOperations` | Remount to refresh remotely changed files |
 | Xcode 27+ build on macOS 26 | `OpenCloseOperations` | Remount to refresh remotely changed files |
-| Xcode 27+ build on macOS 27+ | `Handler` / `ReadWriteHandler` / `DataCacheHandler` | Subdirectory snapshot contract passed on 27.2; root-level remote changes require remount because root cache invalidation fails |
+| Xcode 27+ build on macOS 27+ | `Handler` / `ReadWriteHandler` / `DataCacheHandler` | Root and subdirectory snapshot contracts passed on 27.2; the broker publishes root changes through native namespace operations |
 
 Both paths use the same broker, provider contracts, namespace and block cache. They use normal kernel buffering. The compatibility path pins a file's observed metadata and content version for its `FSItem` lifetime. For providers with revision reads, reopening that item reads the same revision. Closing the last reader releases the provider handle; reclaim releases the item. A provider that cannot reopen the observed revision reports `ESTALE` when the newly opened metadata differs. The provider's read capabilities still determine whether its bytes have an immutable snapshot guarantee.
 
-The item lifetime is controlled by the kernel. This is not a mount-wide historical snapshot of the remote directory tree: new lookups can observe new objects. Remounting is the supported way to refresh the whole mounted view. `daemon refresh` clears daemon metadata; on macOS 26 it cannot invalidate kernel-cached files. Finder previews and file reads use this same compatibility behavior.
+The item lifetime is controlled by the kernel. New lookups can observe new objects. On macOS 26, remounting refreshes the whole mounted view; `daemon refresh` alone cannot invalidate kernel-cached files. On macOS 27, the current broker and extension publish root changes automatically and invalidate ordinary directory caches. Finder previews and file reads follow the applicable OS lifecycle.
+
+Root publication polls the broker's metadata view at `EntryTTL`, stages each changed revision under a unique internal name, and asks the host to execute a native rename. Remote deletion uses unlink/rmdir. These operations update the local presented namespace; providers remain read-only. The extension accepts only the exact pending operation from the mounting user, and the host confines syscalls to the mounted FSKit resource. Root permissions are `0755` so the native calls reach the extension; ordinary create/write/rename/remove still fail. Internal staging names are excluded from directory listings. Publication adds root metadata polling and an IPC/native operation per changed entry; unchanged file data stays cached. Both the CLI/broker binary and the extension must be updated. Legacy direct-provider capability files have no host publisher and retain the earlier root-refresh limitation; use `fusedock mount`, `daemon mount`, or `broker start`.
 
 `FuseDockCompatibilityFSVolume.swift` and `FuseDockCachedFSVolume.swift` own the two lifecycles. The SDK condition in `FuseDock.xcconfig` excludes unavailable symbols from Xcode 26 compilation; `#available(macOS 27, *)` selects the runtime implementation in a newer build. The app displays the applicable refresh instruction.
 
@@ -105,7 +107,7 @@ The NFS bridge remains a future fallback for systems where FSKit or extension de
 - The FSKit extension is read-only.
 - CAPTCHA/OTP prompts are not yet connected to the host application.
 - The daemon has launchd service registration and same-user UDS control. Signed peer authentication and automatic extension reconnection are pending.
-- On macOS 27.2, root-directory cache invalidation returns `NSOSStatusErrorDomain -536870206`, and root-level reopens can return stale content. A standalone Swift volume reproduces the failure; the kernel reports that the root handle has no node in the cache-state lookup table. The full native contract remains failing. The same snapshot and rename contract passes in subdirectories; see [the reproduction and root-cause analysis](fskit-root-cache.md). macOS 26 has a separate native remount-refresh contract.
+- On macOS 27.2, the root-directory cache API returns `NSOSStatusErrorDomain -536870206`. Root namespace publication avoids that API and passes the native root contract; see [the reproduction and implemented resolution](fskit-root-cache.md). macOS 26 keeps its separate remount-refresh contract.
 - The legacy direct credential-file path remains as a fallback, but it is read-only and does not persist a refresh session.
 - The extension requires local signing and the one-time Filesystem Extension toggle.
 - The current implementation is a development build; distribution needs an app bundle, notarization, and a release workflow.
@@ -126,7 +128,7 @@ bin/fusedock daemon stop
 
 The example supports existing account records without an AccountID. For a new binding with an AccountID, omit `--persistent-cache=false` to retain eligible blocks on disk.
 
-To refresh the whole mounted view on macOS 26, or refresh root-level remote changes affected by the macOS 27.2 issue, close files opened from the mount, then run:
+To refresh the whole mounted view on macOS 26, close files opened from the mount, then run:
 
 ```sh
 bin/fusedock daemon unmount --id pku

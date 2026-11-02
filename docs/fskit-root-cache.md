@@ -1,4 +1,4 @@
-# FSKit root-directory cache invalidation on macOS 27.2
+# FSKit root cache failure and namespace publication on macOS 27.2
 
 Observed on 2026-11-01 and 2026-11-02, macOS 27.2 (26B123), arm64. The extension was built with the macOS 27 SDK, signed locally, enabled, and mounted successfully.
 
@@ -12,9 +12,29 @@ The failure occurs before the kernel applies the cache action. A standalone Swif
 
 ## User-visible impact
 
-The ordinary FuseDock native contract changes a root-level file from one immutable revision to another, invalidates daemon metadata, and reopens the path. The reopened file continues to return the old 8,388,625-byte revision throughout the five-second observation window. The same contract inside a subdirectory passes: new opens see the new revision while old descriptors retain their bytes, size, and EOF. Same-size changes and remote rename also pass there. Remounting refreshes both root-level and nested content.
+Before the publication fix, the ordinary FuseDock native contract changed a root-level file from one immutable revision to another, invalidated daemon metadata, and reopened the path. The reopened file continued to return the old 8,388,625-byte revision throughout the five-second observation window. The same contract inside a subdirectory passed.
 
-The full macOS 27 native acceptance result is **failed**. Successful builds and nested-file tests remain separate results.
+The signed normal build at `566631d` passes **both root and nested native snapshot contracts** on this host. It publishes root namespace changes with native rename/unlink instead of calling the failing root cache API. The independently reproduced OS API failure remains documented below.
+
+## Implemented resolution
+
+The extension maintains the root namespace's published metadata. At `EntryTTL`, it compares the current broker listing with that view. A changed file gets a new FSItem under a unique temporary name; the host performs an actual rename over the old name. The rename callback commits the new mapping, and LIFS purges the old name-cache entry. Existing descriptors retain the old FSItem and read handle. Remote renames and removals use native rename and unlink/rmdir respectively. Subdirectories continue to use the successful FSKit directory-invalidation API.
+
+The initial atomic-replacement probe passed old-A/new-B reads, including size and previously unread data. Extended testing with unique staging names passed A→B→C, a same-size B→C update, rename into a negatively cached name, and deletion with all three revisions retained. Reusing a staging name failed on the second publication because that staging name was negatively cached after the first rename; every publication now uses a fresh name.
+
+The normal adapter passed the original, unchanged root snapshot acceptance. Additional native tests passed file and directory creation, negative-cache refresh, remote rename, same-size local-provider replacement, removal with an open old reader, directory-to-file replacement, and enumeration without internal names. User create, mkdir, rename, unlink and a forged publication-name rename were rejected.
+
+### Authorization and filesystem behavior
+
+- The broker advertises publication capability only when the host binds it to a resource. The RPC uses the existing authenticated session and browser-origin rejection. Requests contain immediate child names, never a caller-selected mount path.
+- The Darwin host locates a `fusedock` mount owned by its UID with the exact bound resource URL, opens that root without following a symlink, verifies its filesystem identity, and uses `renameat`/`unlinkat` relative to the descriptor. The descriptor closes after the operation.
+- The extension accepts only the pending operation's names and FSItem, expected overwritten revision, root directories and mounting UID. A successful callback consumes that authorization. Other mutations return a read-only error. No provider write operation was added.
+- Staging names are unique and excluded from enumeration. A staging name refers to the actual staged revision; rename really changes the local mapping. Removal really removes its entry. The provider credentials remain in the host.
+- Root directory mode is `0755` to permit native publication to reach the module; files remain `0444`. Write permission bits on the root do not grant arbitrary namespace mutations. This distinction is covered by the native mutation-rejection tests.
+- Root refresh now incurs a metadata list at each TTL and a native operation per changed entry. It retains a root metadata view and processes the diff by object identity. It preserves normal file caching, the mount path, and old read handles.
+- A current broker is required. Managed CLI/daemon mounts and `broker start` bind a publisher; legacy direct-provider resource files do not have that host channel.
+
+Root lookup and reclaim share a synchronization context and use Apple's [tryReclaim API](https://developer.apple.com/documentation/fskit/fsitem/tryreclaim(_:)) so a racing lookup can retain an item the kernel tried to reclaim. Publication syscalls run outside module locks, allowing kernel callbacks to reenter the extension.
 
 ## Independent reproduction
 
@@ -113,9 +133,10 @@ The required behavior remains: the existing mount layout, new opens resolving a 
 | Approach | Effect | Cost or remaining limitation |
 | --- | --- | --- |
 | OS correction to root cache-state lookup | Makes the documented directory invalidation path usable for the root | Requires a corrected system build and rerunning both the standalone and native contracts |
+| Implemented native namespace publication | Fresh root opens and retained old descriptors pass together | Root metadata polling, one native operation per change, internal staging and an authenticated host publisher |
 | Unmount, refresh daemon metadata, mount | Refreshes the whole tree; verified locally | Ends the mount and requires applications to release their open files; it does not satisfy in-place refresh acceptance |
 | Stable top-level account directories | Places provider files in ordinary child directories where the snapshot contract passes | Adds a path component; top-level account add/remove/rename still requires root invalidation or remount. This layout is not implemented by this investigation |
 
 Apple documents [directory name-cache purging by `.invalidate`](https://developer.apple.com/documentation/fskit/fsvolume/kernelcachecoherencyaction/invalidate), [cache-state calls outside module locks](https://developer.apple.com/documentation/fskit/fsvolume/setcachestate(for:cachemode:coherencytype:action:)), and [`.revoke` as revoking access and reclaiming the vnode](https://developer.apple.com/documentation/fskit/fsvolume/kernelcachecoherencyaction/revoke). The measured revocation behavior above fails simultaneous old/new-revision acceptance while allowing refresh after old descriptors close. A new directory layout changes the filesystem interface and needs a separate design decision.
 
-The remaining root issue is tracked in [the acceptance plan](../TODO.md#platform-isolation-and-native-tests). This report and reproducer are ready for an upstream issue; no report has been submitted to Apple.
+The application-level root refresh fix is recorded in [the acceptance plan](../TODO.md#platform-isolation-and-native-tests). The standalone API reproduction remains suitable for an upstream issue; no report has been submitted to Apple.
