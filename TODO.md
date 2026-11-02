@@ -117,7 +117,7 @@ Acceptance: the core has no native driver dependency; platform builds select exa
 - [ ] Enforce byte budgets and global request/fill concurrency. Admission happens before allocation; cancellation releases reservations and unused work.
 - [ ] Implement byte-budgeted 2Q: first-use FIFO, protected reusable entries, and bounded ghost history. Account for headers, payloads, and metadata overhead.
 - [x] Group correlated reads from one sequential access when recording reuse; thousands of small reads within one block must not promote a scan into a long-term hot set.
-- [ ] Separate provider fetch granularity from persistent block size. Grow bounded read-ahead for sequential access and reduce it after seeks; cancel unused speculative work.
+- [x] Separate provider fetch granularity from persistent block size. Foreground reads fetch missing intervals; bounded sequential read-ahead grows from 64 KiB to 4 MiB and cancels on seek/close. Progressive Baidu responses let foreground reads consume ready prefixes. Complete eligible blocks alone reach disk. Controlled HTTP and macOS native small-read checks are recorded in [read-delivery measurements](docs/foundation-status.md#read-delivery-measurements).
 - [ ] Add call, network-byte, latency, queue-time, cancellation, and resource counters at the common provider/VFS boundary.
 - [ ] Make metadata TTL configurable per provider/session and expose explicit invalidation. Determine defaults from measured freshness and request costs.
 - [ ] Measure Finder open/scroll activity over 60 seconds, QuickLook and media seeks, cold/warm reads, and bounded provider rate-limit behavior. Treat the 8.84 s cold PKU sample as preliminary evidence.

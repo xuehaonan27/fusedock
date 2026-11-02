@@ -31,6 +31,7 @@ type reader struct {
 	closed                bool
 	ctx                   context.Context
 	cancel                context.CancelFunc
+	ahead                 readAhead
 }
 
 func (s *Session) OpenRead(ctx context.Context, object provider.Object) (provider.Reader, error) {
@@ -102,23 +103,49 @@ func (r *reader) ReadAt(ctx context.Context, dest []byte, off int64) (int, error
 	if len(dest) == 0 || off >= r.snapshot.Size {
 		return 0, nil
 	}
+	end := off + min(int64(len(dest)), r.snapshot.Size-off)
+	sequential := r.observeRead(off, end)
 	written := 0
 	for written < len(dest) && off < r.snapshot.Size {
 		start := off / r.block * r.block
 		length := min(r.block, r.snapshot.Size-start)
-		key := blockcache.Key{Node: namespace.NodeKey{Namespace: r.session.namespace, ObjectID: r.snapshot.ID}, Version: r.snapshot.ContentVersion, Size: r.snapshot.Size, Offset: start, Length: length, Scope: r.scope}
-		lease, err := r.session.blocks.Acquire(ctx, key, r.persist, r.access, func(fillCtx context.Context, b []byte) error { return r.fill(fillCtx, b, start) })
+		key := r.key(start, length)
+		var lease *blockcache.Lease
+		var err error
+		if r.whole {
+			lease, err = r.session.blocks.Acquire(ctx, key, r.persist, r.access, func(fillCtx context.Context, b []byte) error { return r.fill(fillCtx, b, start, nil) })
+		} else {
+			lease, err = r.session.blocks.AcquireRange(ctx, key, r.persist, r.access, off-start, min(end-off, start+length-off), r.fill)
+		}
 		if err != nil {
 			return written, err
 		}
-		n := copy(dest[written:], lease.Bytes()[off-start:])
+		data := lease.Bytes()
+		if r.whole {
+			data = data[off-start:]
+		}
+		n := copy(dest[written:], data)
 		lease.Release()
 		written += n
 		off += int64(n)
 	}
+	if sequential && !r.whole {
+		r.prefetch(end)
+	}
 	return written, nil
 }
-func (r *reader) fill(ctx context.Context, b []byte, off int64) error {
+func (r *reader) key(start, length int64) blockcache.Key {
+	return blockcache.Key{Node: namespace.NodeKey{Namespace: r.session.namespace, ObjectID: r.snapshot.ID}, Version: r.snapshot.ContentVersion, Size: r.snapshot.Size, Offset: start, Length: length, Scope: r.scope}
+}
+func (r *reader) fill(ctx context.Context, b []byte, off int64, publish func(int)) error {
+	return r.fillRange(ctx, b, off, publish, false)
+}
+
+func (r *reader) prefetchFill(ctx context.Context, b []byte, off int64, publish func(int)) error {
+	return r.fillRange(ctx, b, off, publish, true)
+}
+
+func (r *reader) fillRange(ctx context.Context, b []byte, off int64, publish func(int), background bool) error {
 	r.session.Counters.Read.Add(1)
 	start := time.Now()
 	defer func() { r.session.Counters.LatencyNanos.Add(uint64(time.Since(start))) }()
@@ -138,7 +165,29 @@ func (r *reader) fill(ctx context.Context, b []byte, off int64) error {
 		}
 		source = r.remote
 	}
-	n, err := source.ReadAt(ctx, b, off)
+	var n int
+	var err error
+	if progressive, ok := source.(provider.ProgressiveReader); ok && publish != nil {
+		n, err = progressive.ReadAtProgress(ctx, b, off, publish)
+	} else if background {
+		// Providers without incremental delivery use bounded prefetch pieces,
+		// so a foreground waiter never inherits a multi-MiB speculative fill.
+		for n < len(b) {
+			end := min(len(b), n+int(initialReadAhead))
+			if n != 0 {
+				r.session.Counters.Read.Add(1)
+			}
+			var count int
+			count, err = source.ReadAt(ctx, b[n:end], off+int64(n))
+			n += count
+			if err != nil || n != end {
+				break
+			}
+			publish(n)
+		}
+	} else {
+		n, err = source.ReadAt(ctx, b, off)
+	}
 	if err != nil && !errors.Is(err, io.EOF) {
 		return err
 	}
@@ -156,6 +205,7 @@ func (r *reader) fill(ctx context.Context, b []byte, off int64) error {
 }
 func (r *reader) Close() error {
 	r.cancel()
+	r.stopPrefetch()
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if r.closed {

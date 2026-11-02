@@ -59,27 +59,37 @@ type entry struct {
 	elem      *list.Element
 	access    uint64
 	retain    bool
+	valid     []span
+	loads     []*flight
+	epoch     uint64
+	persist   bool
+	stored    chan struct{}
+	touched   chan struct{}
+	atomic    bool
 }
 type flight struct {
 	key     Key
+	entry   *entry
+	span    span
 	done    chan struct{}
 	ctx     context.Context
 	cancel  context.CancelFunc
 	waiters int
-	entry   *entry
 	err     error
-	epoch   uint64
+	retry   bool
 }
 type Cache struct {
 	mu                      sync.Mutex
 	limit, used, reserved   int64
 	recentBytes             int64
 	entries                 map[string]*entry
-	flights                 map[string]*flight
+	flights                 map[*flight]struct{}
+	pending                 int
 	recent, frequent, ghost list.List
 	ghosts                  map[string]*list.Element
 	changed                 chan struct{}
 	slots                   chan struct{}
+	prefetch                chan struct{}
 	closed                  bool
 	workers                 sync.WaitGroup
 	disk                    *diskStore
@@ -97,7 +107,7 @@ func New(o Options) (*Cache, error) {
 	if o.MemoryBytes < 1 || o.FillConcurrency < 1 {
 		return nil, errors.New("invalid cache budget")
 	}
-	c := &Cache{limit: o.MemoryBytes, entries: map[string]*entry{}, flights: map[string]*flight{}, ghosts: map[string]*list.Element{}, changed: make(chan struct{}), slots: make(chan struct{}, o.FillConcurrency), epochs: map[string]uint64{}}
+	c := &Cache{limit: o.MemoryBytes, entries: map[string]*entry{}, flights: map[*flight]struct{}{}, ghosts: map[string]*list.Element{}, changed: make(chan struct{}), slots: make(chan struct{}, o.FillConcurrency), prefetch: make(chan struct{}, o.FillConcurrency/2), epochs: map[string]uint64{}}
 	if o.DiskDirectory != "" && o.DiskBytes > 0 {
 		d, err := openDisk(o.DiskDirectory, o.DiskBytes, &c.Metrics)
 		if err != nil {
@@ -114,10 +124,11 @@ func (c *Cache) signal()      { close(c.changed); c.changed = make(chan struct{}
 type Lease struct {
 	cache *Cache
 	entry *entry
+	span  span
 	once  sync.Once
 }
 
-func (l *Lease) Bytes() []byte { return l.entry.data }
+func (l *Lease) Bytes() []byte { return l.entry.data[l.span.start:l.span.end] }
 func (l *Lease) Release() {
 	l.once.Do(func() { c := l.cache; c.mu.Lock(); c.release(l.entry); c.mu.Unlock() })
 }
@@ -186,160 +197,9 @@ func (c *Cache) touch(e *entry, access uint64) {
 	e.access = access
 }
 
-// Acquire coalesces fills without borrowing the first waiter's cancellation.
-// fill must produce exactly key.Length verified bytes, or an error.
-func (c *Cache) Acquire(ctx context.Context, k Key, persist bool, access uint64, fill func(context.Context, []byte) error) (*Lease, error) {
-	if !k.Valid() || k.Length > c.limit {
-		return nil, errors.New("block exceeds cache memory budget")
-	}
-	if err := ctx.Err(); err != nil {
-		return nil, err
-	}
-	id := k.Hash()
-	c.mu.Lock()
-	if c.closed {
-		c.mu.Unlock()
-		return nil, errors.New("cache closed")
-	}
-	if e := c.entries[id]; e != nil && e.retain {
-		e.refs++
-		c.touch(e, access)
-		if persist && c.disk != nil {
-			c.disk.touch(k, access)
-		}
-		c.Metrics.Hits.Add(1)
-		c.mu.Unlock()
-		return &Lease{cache: c, entry: e}, nil
-	}
-	f := c.flights[id]
-	if f == nil {
-		fctx, cancel := context.WithCancel(context.Background())
-		f = &flight{key: k, done: make(chan struct{}), ctx: fctx, cancel: cancel, epoch: c.epochs[k.Node.Namespace.Tag()]}
-		c.flights[id] = f
-		c.workers.Add(1)
-		c.Metrics.Misses.Add(1)
-		go c.fetch(k, persist, access, f, fill)
-	} else {
-		c.Metrics.Coalesced.Add(1)
-	}
-	f.waiters++
-	c.mu.Unlock()
-	select {
-	case <-f.done:
-	case <-ctx.Done():
-	}
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	if err := ctx.Err(); err != nil {
-		f.waiters--
-		if f.entry != nil {
-			c.release(f.entry)
-		}
-		if f.waiters == 0 {
-			f.cancel()
-			if c.flights[id] == f {
-				delete(c.flights, id)
-			}
-		}
-		return nil, err
-	}
-	if f.err != nil {
-		return nil, f.err
-	}
-	return &Lease{cache: c, entry: f.entry}, nil
-}
-func (c *Cache) fetch(k Key, persist bool, access uint64, f *flight, fill func(context.Context, []byte) error) {
-	defer c.workers.Done()
-	defer f.cancel()
-	var data []byte
-	var err error
-	reserved := false
-	select {
-	case c.slots <- struct{}{}:
-		defer func() { <-c.slots }()
-	case <-f.ctx.Done():
-		err = f.ctx.Err()
-	}
-	if err == nil {
-		c.mu.Lock()
-		for c.used+c.reserved+k.Length > c.limit && f.ctx.Err() == nil && !c.closed {
-			if c.evict() {
-				continue
-			}
-			ch := c.changed
-			c.mu.Unlock()
-			select {
-			case <-ch:
-			case <-f.ctx.Done():
-			}
-			c.mu.Lock()
-		}
-		if c.closed {
-			err = errors.New("cache closed")
-		} else if f.ctx.Err() != nil {
-			err = f.ctx.Err()
-		} else {
-			c.reserved += k.Length
-			reserved = true
-		}
-		c.mu.Unlock()
-	}
-	if err == nil {
-		data = make([]byte, int(k.Length))
-		hit := false
-		if persist && k.Scope == "" && k.Version != "" && c.disk != nil {
-			hit = c.disk.read(k, data, access)
-		}
-		if !hit {
-			err = fill(f.ctx, data)
-			if err == nil {
-				c.Metrics.NetworkBytes.Add(uint64(len(data)))
-			}
-		}
-		if err == nil && !hit && persist && k.Scope == "" && k.Version != "" && c.disk != nil {
-			c.mu.Lock()
-			valid := !c.closed && c.epochs[k.Node.Namespace.Tag()] == f.epoch && f.ctx.Err() == nil
-			c.mu.Unlock()
-			if valid {
-				c.disk.write(k, data, f.epoch, access)
-			}
-		}
-	}
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	if reserved {
-		c.reserved -= k.Length
-	}
-	if c.flights[k.Hash()] == f {
-		delete(c.flights, k.Hash())
-	}
-	if err == nil && (c.closed || f.waiters == 0 || f.ctx.Err() != nil) {
-		err = context.Canceled
-	}
-	if err == nil {
-		e := &entry{key: k, data: data, refs: f.waiters, access: access, retain: c.epochs[k.Node.Namespace.Tag()] == f.epoch}
-		if old := c.ghosts[k.Hash()]; old != nil {
-			e.protected = true
-			c.ghost.Remove(old)
-			delete(c.ghosts, k.Hash())
-		}
-		if e.protected {
-			e.elem = c.frequent.PushFront(e)
-		} else {
-			e.elem = c.recent.PushFront(e)
-			c.recentBytes += k.Length
-		}
-		c.entries[k.Hash()] = e
-		c.used += k.Length
-		f.entry = e
-	}
-	f.err = err
-	close(f.done)
-	c.signal()
-}
 func (c *Cache) Stats() Stats {
 	c.mu.Lock()
-	s := Stats{MemoryBytes: c.used, ReservedBytes: c.reserved, MemoryLimit: c.limit, Entries: len(c.entries), Flights: len(c.flights)}
+	s := Stats{MemoryBytes: c.used, ReservedBytes: c.reserved, MemoryLimit: c.limit, Entries: len(c.entries), Flights: len(c.flights) + c.pending}
 	c.mu.Unlock()
 	m := &c.Metrics
 	s.Hits = m.Hits.Load()
@@ -387,7 +247,7 @@ func (c *Cache) Close() error {
 			c.remove(e, false)
 		}
 	}
-	for _, f := range c.flights {
+	for f := range c.flights {
 		f.cancel()
 	}
 	c.signal()
@@ -403,7 +263,7 @@ func (c *Cache) Close() error {
 func (c *Cache) DiscardScope(ns namespace.Namespace, scope string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	for _, f := range c.flights {
+	for f := range c.flights {
 		if f.key.Node.Namespace == ns && f.key.Scope == scope {
 			f.cancel()
 		}

@@ -10,8 +10,8 @@ Updated 2026-11-02. [TODO.md](../TODO.md) remains the complete acceptance plan. 
 | Namespace | Account/provider/object keys, resolved scope roots, target revocation, deterministic volume IDs, sequential collision-free inode allocation. |
 | Read contract | ContentVersion and MetadataVersion, session capability negotiation, explicit immutable revision reads, optional whole-object declared-digest verification. |
 | PKU | Each exact read and signed-URL renewal carries the original revision. Fixtures verify renewal, strict range responses, and missing-revision conflicts. |
-| Baidu | Current-content reads and fresh metadata; canonical declared MD5 is represented in object metadata. Declared-digest persistence is disabled pending modification, duplicate-content, and concurrent-change qualification. |
-| Cache | Shared immutable blocks, independent cancellation of coalesced fills, memory reservations, byte-based 2Q, bounded ghost history, correlated-read accounting, pinned leases, persistent restart hits, corruption removal/refill, background stat-only scanning. |
+| Baidu | Current-content reads, progressive HTTP range delivery, per-reader download-link reuse/renewal, and fresh metadata; canonical declared MD5 is represented in object metadata. Declared-digest persistence is disabled pending modification, duplicate-content, and concurrent-change qualification. |
+| Cache | Shared blocks with independently available immutable intervals, demand-sized fetches, bounded adaptive read-ahead, independent cancellation of coalesced fills, memory reservations, byte-based 2Q, bounded ghost history, correlated-read accounting, pinned leases, asynchronous complete-block persistence, restart hits, corruption removal/refill, background stat-only scanning. |
 | Disk storage | One-owner lock, private directories, namespace-separated paths, root-relative publication, header/key/size/payload checks, platform file checks, clear/prune/verify. |
 | Broker | Protocol v2; server-resolved objects/revisions; binary reads; explicit read/release; single-use bootstrap; revocable in-memory capabilities; per-endpoint handle limits and shared IPC concurrency. |
 | Daemon | Shared cache and metadata/IPC concurrency, session pooling, local control, data attachment, saved mount restoration, reauthentication by AccountID, account-removal/rebind observation, lifecycle state/error reporting. |
@@ -98,11 +98,32 @@ On 2026-11-02, a second standalone Swift probe verified actual file contents: af
 3. Implement signed macOS peer reconnection and endpoint discovery after extension restart. The current one-use bootstrap does not recover a relaunched extension. Test transport, daemon, extension, and reauthentication recovery separately.
 4. Finish explicit forced shutdown, retry after a failed native unmount, and bounded shutdown behavior. Current errors remain visible; a failed native unmount may still leave the OS mount present.
 5. Complete accounting/admission for metadata in-flight allocations, object/node tables, reader tables, temporary files, and process overhead. Shared block payloads and request concurrency already have limits; some identity maps still grow with observed objects.
-6. Separate provider fetch granularity from persistent block size and implement bounded adaptive read-ahead. Current read blocks are 4 MiB, capped by the memory budget.
+6. Measure the implemented demand-read/adaptive-prefetch policy against real provider latency and Finder/QuickLook workloads. Fetch size is now independent of the 4 MiB storage block; the controlled and native small-read results are recorded below.
 7. Carry request IDs across the complete read path and expose bounded diagnostics. Add native workload measurements for Finder, QuickLook, media seeking, rate limiting, and TTL selection. Current TTL and whole-file limits are provisional.
 8. Complete per-surface Unicode/case/name collision rules, remote replacement tests, PKU real revision mutation cases, and Baidu digest qualification.
 
 The completed code and these open items belong to the same delivery. WebDAV and old-account migration remain at the end of the product backlog.
+
+## Read delivery measurements
+
+On 2026-11-02, the local macOS 27.2 native suite passed with the demand-range cache. `TestFSKitSmallReadFetchGranularity` opened an 8 MiB fixture through the installed FSKit extension: a 32 KiB application read generated exactly one provider range, offset 0 / length 32768. Its local fixture latency was 1.25 ms. Root/nested snapshots, publication, read-only operations and unmount also passed. This test uses local fixture bytes, not Baidu service throughput.
+
+`BenchmarkBaiduReadDelivery` uses a local HTTP server that emits 32 KiB per millisecond. The baseline issues the former synchronous 4 MiB request. Three measured iterations on the same host produced:
+
+| Workload | Delivery | Time/op | Remote bytes/op | Data GETs/op | dlink calls/op |
+| --- | --- | ---: | ---: | ---: | ---: |
+| First 32 KiB | 4 MiB fill baseline | 151.27 ms | 4,194,304 | 1 | 1 |
+| First 32 KiB | Demand range | 2.28 ms | 32,768 | 1 | 1 |
+| Sequential 4 MiB | 4 MiB fill baseline | 151.07 ms | 4,194,304 | 1 | 1 |
+| Sequential 4 MiB | Demand + adaptive prefetch | 151.80 ms | 4,194,304 | 7.33 | 1 |
+
+The first-read transfer falls by 128 times in this workload. Sequential transfer size stays constant; additional requests are the cost of early delivery and adaptive read-ahead. The fixture has local request latency, so real WAN round-trip costs require a separate measurement. Run it with:
+
+```sh
+go test ./internal/providers/baidu -run '^$' -bench BenchmarkBaiduReadDelivery -benchtime=3x -count=1
+```
+
+Deterministic regressions hold the tail of a prefetch HTTP response open and verify that foreground reads return its ready prefix. They also cover seek cancellation, concurrent download-link reuse and renewal, overlapping range reuse, failed partial responses, full-block assembly/restart, memory budgets, independent waiter cancellation and unchanged whole-object digest validation. The cancellation/sharing/provider cases additionally passed 20 repetitions with the race detector. No real account credentials are needed for these checks.
 
 ## Runtime minimums
 

@@ -37,33 +37,41 @@ func (s *readSession) OpenRead(context.Context, provider.Object) (provider.Reade
 	return s.reader, nil
 }
 
-func TestReadHandleCoalescesDriverReads(t *testing.T) {
+func TestSmallReadDoesNotDownloadWholeBlock(t *testing.T) {
 	data := make([]byte, defaultReadBlock*2)
 	for i := range data {
 		data[i] = byte(i % 251)
 	}
 	handle := &rangeReader{data: data}
 	session := New(&readSession{reader: handle}, 0)
-	object := provider.Object{ID: "file", Kind: provider.KindFile, Size: int64(len(data))}
-	reader, err := session.OpenRead(context.Background(), object)
+	defer session.Close()
+	reader, err := session.OpenRead(context.Background(), provider.Object{ID: "file", Kind: provider.KindFile, Size: int64(len(data))})
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer reader.Close()
 	buf := make([]byte, 32<<10)
-	for off := int64(0); off < 128<<10; off += int64(len(buf)) {
-		if _, err := reader.ReadAt(context.Background(), buf, off); err != nil {
+	for i := 0; i < 2; i++ {
+		if _, err := reader.ReadAt(context.Background(), buf, 0); err != nil {
 			t.Fatal(err)
 		}
 	}
 	if calls := handle.calls.Load(); calls != 1 {
-		t.Fatalf("sequential reads made %d provider calls", calls)
+		t.Fatalf("repeated range fetched %d times", calls)
+	}
+	if bytes := session.CacheStats().NetworkBytes; bytes != uint64(len(buf)) {
+		t.Fatalf("small read fetched %d bytes", bytes)
 	}
 	if _, err := reader.ReadAt(context.Background(), buf, defaultReadBlock-1); err != nil {
 		t.Fatal(err)
 	}
-	if calls := handle.calls.Load(); calls != 2 {
-		t.Fatalf("cross-block read made %d provider calls", calls)
+	for i, v := range buf {
+		if v != data[int(defaultReadBlock)-1+i] {
+			t.Fatalf("cross-block byte %d", i)
+		}
+	}
+	if bytes := session.CacheStats().NetworkBytes; bytes != uint64(2*len(buf)) {
+		t.Fatalf("head/tail reads fetched %d bytes", bytes)
 	}
 }
 

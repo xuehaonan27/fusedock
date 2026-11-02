@@ -136,7 +136,9 @@ Provisional tuning candidates for measurement (not selected defaults):
 
 The block, whole-file, read-ahead, and TTL values are provisional until baseline measurements cover PKU/Baidu latency, Finder relist calls, QuickLook behavior, and range throughput.
 
-For a file at or below whole-file, the first read can fill the whole file as one cache entry when it has exact revision binding or a declared digest that matches the OpenRead snapshot. A weaker provider without either proof falls back to ordinary uncached reads (or eligible range caching where that is independently proven). For a larger file, reads are aligned to block-size; the final block is shortened to the remaining file length. A read spanning blocks preserves requested byte order; fetching and bounded prefetch follow the measured sequential/seek policy.
+The implemented range path uses 4 MiB storage blocks, shortened at EOF and capped by the memory budget. Foreground reads fetch only missing requested intervals within those blocks. Exact-revision reads may share those intervals across opens; weaker current-content reads retain them only within one open and never persist them. Complete eligible blocks are written asynchronously. A small exact-revision file does not require an automatic whole-file download.
+
+Sequential access starts a background window at 64 KiB and grows it to at most 4 MiB as consumption continues. A seek resets the window and cancels unused work; close cancels and joins the handle's prefetch task. At most half the configured global fill concurrency can be used by prefetch (none when concurrency is one). Progressive providers publish validated immutable prefixes of a response, which can satisfy foreground waiters before its tail arrives. Providers exposing only atomic `ReadAt` use speculative requests of at most 64 KiB. The same byte budget accounts for partial, complete, in-flight and disk-write-pinned block payloads.
 
 On lookup, use an eligible verified whole-file entry or an independently eligible range entry. If whole-file retention exceeds the disk budget, a validated download may still satisfy the read without retention. Range fallback requires its own per-request proof; whole-file eligibility cannot supply it. Whole-file digest verification is an optional object policy, not a mandatory open cost.
 
@@ -149,21 +151,24 @@ The per-handle single-block buffer should become unnecessary once the persistent
 ~~~
 driver ReadAt
    -> validate offset/length against Object.Size
-   -> compute block key
-   -> lookup in-memory index
-       hit: open/read local block; verify payload once per process, then return bytes
-       miss: join or create one in-flight fill
-   -> fetch according to exact-range or whole-object proof
-   -> validate exact byte count, snapshot size, and the selected proof
-      (whole-object: complete digest comparison before any byte delivery)
-   -> write complete temp file, close, atomically rename into entries/
-   -> optional conservative fsync mode
-   -> return requested bytes
+   -> compute storage block key and requested interval
+   -> look up verified disk data or immutable in-memory intervals
+       hit: pin and return the requested interval
+       miss: join overlapping work or fetch only an uncovered interval
+   -> validate range headers and revision binding before publishing prefixes
+   -> return once this request's interval is available
+   -> extend bounded background read-ahead during sequential access
+   -> when the whole eligible block is complete and all its fills succeeded:
+       write temp file asynchronously, close, atomically rename into entries/
+
+whole-object digest path:
+   -> download and validate the entire object against the open snapshot
+   -> publish the verified entry and deliver requested bytes
 ~~~
 
-Only one fill may exist per block key. The fill owns its context rather than borrowing the first caller's request context. Each waiter can cancel independently; when the last waiter leaves, an unused fill may be cancelled. A successful fill may still finish and publish if another waiter remains. Provider fills are limited globally so a directory of parallel readers cannot exhaust sockets or memory.
+Within one block, concurrent fills own disjoint intervals. Overlapping requests join the existing interval fill and reuse its validated prefixes. A fill owns its context rather than borrowing the first caller's request context. Each waiter can cancel independently; when the last waiter leaves, unused work is cancelled. A successful fill can continue if another waiter remains. Provider fills are limited globally so a directory of parallel readers cannot exhaust sockets or memory.
 
-The fill result is published only after the exact expected size is received. A short read, extra bytes, mismatched size, or provider cancellation removes the temporary file and returns an error; it never leaves a partial file under a valid cache name.
+Disk publication requires complete coverage and successful response validation. A short read, extra bytes, mismatched size, or provider cancellation cannot publish an incomplete block under a valid disk key. Incrementally validated prefixes may remain available in memory after a later transport failure; unvalidated tails are fetched again on demand. Whole-object digest failure exposes no bytes.
 
 If the cache cannot write because of permission, disk pressure, or a full budget with every block pinned, a successfully downloaded block is returned to the caller and simply not retained. A cache write failure must not fail an otherwise valid read. The default path does not fsync every block or directory: cache data is disposable, and a torn file left by a crash is detected by its header/payload hash and removed. A conservative fsync mode remains available for deployments that prefer reduced torn-file frequency over write amplification.
 
@@ -199,7 +204,7 @@ Measure sequential scans mixed with a repeatedly accessed working set, Finder/Qu
 
 - Metadata cache lock: short; never held across provider or disk I/O.
 - Block index lock: short; protects map, LRU links, refcounts, and budget accounting.
-- Per-block flight: serializes one remote fill without serializing unrelated blocks.
+- Per-interval flight: coalesces overlapping reads while disjoint intervals can progress independently.
 - Per-file handle: serializes its local offset state only; ReadAt remains safe for concurrent use.
 - Cache owner: exactly one process owns a cache root through owner.lock. A second process receives a clear error or runs without persistent caching; it must not race eviction in the same directory.
 - Unmount/daemon shutdown: cancel unused fills, wait for active I/O, flush access metadata, and leave completed entry files intact for the next run.

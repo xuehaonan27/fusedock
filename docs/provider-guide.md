@@ -64,7 +64,9 @@ For duplicate library or root names, disambiguate deterministically inside the p
 
 For remote HTTP storage, return only bytes covered by a validated `Content-Range`. Reject a signed URL with a different origin or scheme than expected. Never include a signed URL, query string, token, or credential header in an error.
 
-The VFS requests up to 4 MiB at a time. A provider may fetch exact ranges or a larger server-supported unit, but it must answer the requested slice without inventing data. Bound response bodies and validate revision size when the API exposes it.
+The VFS separates 4 MiB cache blocks from requested network ranges. A first 32 KiB read requests only its missing 32 KiB; sequential access can grow background requests up to 4 MiB. A provider must bound response bodies and validate the selected size/revision when the API exposes it.
+
+An optional `provider.ProgressiveReader` implements `ReadAtProgress(ctx, dest, offset, publish)`. After validating response headers and revision binding, it can call `publish(n)` as immutable prefixes arrive. Calls are synchronous and monotonic; the provider must never rewrite a published prefix. The cache can return that prefix to a foreground waiter while the remaining response is in flight. A subsequent transport failure leaves only the published prefix available. Complete blocks alone qualify for disk publication. Whole-object digest readers continue to verify the entire object before exposing any bytes. Providers without progressive delivery retain `ReadAt`; their speculative requests are limited to 64 KiB each.
 
 ## Authentication
 

@@ -213,6 +213,10 @@ Use a directory that exists in your account, and quote paths containing spaces. 
 
 ## Refresh and caching
 
+File reads fetch the missing byte ranges requested by the application; a small first read no longer downloads a whole 4 MiB cache block. Sequential reads start asynchronous read-ahead at 64 KiB and grow it up to 4 MiB. Bytes from an in-flight Baidu response become available in 32 KiB increments, so a small foreground read can finish before that response ends. A seek or closing the read handle cancels unused prefetch. The read handle reuses its download link and refreshes a reused link once after HTTP 401, 403, 404 or 410.
+
+This reduces first-read transfer and latency. It also makes more range requests than one large synchronous download; the [controlled measurements](foundation-status.md#read-delivery-measurements) report both latency and request count. Image decoders and the OS can still request more than the file header. Baidu data is cached in memory for the open read handle and released at close; native OS buffering may also serve repeated reads.
+
 On macOS 27 with the current CLI/broker and app, remote directory changes refresh automatically through root namespace publication and child-directory cache invalidation. The daemon's metadata TTL defaults to two seconds. On macOS 26, refresh the mounted view by unmounting, refreshing daemon metadata, and mounting again:
 
 ```sh

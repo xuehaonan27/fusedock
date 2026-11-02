@@ -170,6 +170,16 @@ type Reader interface {
 	io.Closer
 }
 
+// ProgressiveReader optionally makes validated prefixes available while a
+// range is still arriving. publish(n) is synchronous and monotonic; the first
+// n bytes must never be modified afterwards. Validate response headers and
+// revision binding before publishing. Whole-object digest proofs cannot use
+// this interface to deliver bytes before the full digest has been checked.
+type ProgressiveReader interface {
+	Reader
+	ReadAtProgress(context.Context, []byte, int64, func(int)) (int, error)
+}
+
 // Session exposes a read-only hierarchical namespace. The initial public
 // contract intentionally delays mutation and sharing semantics until adapters
 // can express revision-based conflict handling consistently across providers.
