@@ -119,6 +119,45 @@ The public login page and its challenge parsing can be checked without an accoun
 FUSEDOCK_LIVE_PKU=1 go test -run '^TestLivePKULoginPage$' -v ./internal/providers/pku
 ```
 
+## Mount Baidu NetDisk (百度网盘)
+
+Baidu mounts are read-only. If `bin/fusedock ls --account baidu` already works, continue with the mount commands below using that saved account.
+
+For a new account, obtain your application's AppKey and SecretKey from the [Baidu NetDisk developer console](https://pan.baidu.com/union/console/applist), then run:
+
+```sh
+bin/fusedock account add --provider baidu --name baidu
+bin/fusedock ls --account baidu
+```
+
+The first command prompts for the application keys and opens Baidu's device authorization page. Enter the displayed code in the browser and approve access. The saved account keeps the keys and renewable tokens in the system credential store. The [Baidu guide](docs/baidu.md#authorize-an-account) also covers importing the existing `setup-baidu-app.sh` bootstrap file.
+
+On macOS, first [install and enable the FSKit extension](#macos-fskit). Use the current CLI and app together. To keep the mount running after closing the terminal:
+
+```sh
+mkdir -p "$HOME/FuseDockBaidu"
+bin/fusedock daemon start
+bin/fusedock daemon mount --id baidu --account baidu \
+  --mountpoint "$HOME/FuseDockBaidu" --scope / \
+  --persistent-cache=false
+bin/fusedock daemon status
+```
+
+Wait for the `baidu` mount's state to become `mounted` in `daemon status`, then browse it:
+
+```sh
+ls "$HOME/FuseDockBaidu"
+open "$HOME/FuseDockBaidu"
+```
+
+`--persistent-cache=false` also supports older saved accounts without an AccountID. Baidu currently reads current content; revision-bound persistent content caching is not enabled for this provider. Unmount with:
+
+```sh
+bin/fusedock daemon unmount --id baidu
+```
+
+For a foreground mount on macOS or Linux, create an empty mount directory and run `bin/fusedock mount --account baidu "$HOME/FuseDockBaidu"`; Ctrl-C unmounts it. Choose either the foreground or daemon workflow for a given mountpoint. The [full Baidu guide](docs/baidu.md) includes Linux and Windows commands, mounting a remote subdirectory, refresh behavior, and the manual FSKit broker workflow.
+
 ## Why this shape
 
 Cloud providers disagree on object identity, modification versions, pagination, authentication, and byte-range support. FuseDock keeps those differences inside a provider and requires the adapter to return stable object IDs and versions. The mount layer never reconstructs a vendor path or trusts a vendor name as an identity.
@@ -132,7 +171,7 @@ Linux FUSE / macOS FSKit / WinFsp / GUI / CLI
           |
    provider.Session
           |
-  local / PKU / future providers
+  local / PKU / Baidu / future providers
 ```
 
 The metadata cache coalesces concurrent listings and stats. Version-bound readers share immutable blocks through the daemon. PKU binds each download URL renewal to the selected revision. Baidu uses ordinary current-content reads until its declared-digest mutation and concurrency tests pass. Whole-file verification is an optional capability path, with a size limit. Metadata TTL and persistence are mount settings; their defaults still need native workload measurements.
@@ -176,18 +215,6 @@ fusedock version
 
 Persistent retention requires an account with a stable AccountID. New account bindings include one. Older saved accounts can mount with `--persistent-cache=false`; their migration remains separate backlog work. Requesting persistence for a legacy account returns an explicit error before credential access.
 
-Baidu application credentials can be imported from an owner-only bootstrap file:
-
-```sh
-./scripts/setup-baidu-app.sh
-bin/fusedock account add \
-  --credential-file "$HOME/.config/fusedock/baidu-app.credentials" \
-  --name baidu --default
-bin/fusedock ls --account baidu
-```
-
-See the [Baidu guide](docs/baidu.md) for the device authorization flow and mount commands.
-
 Provider-specific configuration uses repeatable `--option key=value`. Credentials use `--credential-file PATH`, `--credential key=value`, or `--credential-env key=ENV`. Credential files must be regular files owned by the current user with no group or world permissions. Secrets are cleared from the in-memory map after the provider opens.
 
 ## macOS FSKit
@@ -203,7 +230,9 @@ open "$HOME/Applications/FuseDock.app"
 
 Enable the module using **By Category → File System Extensions** in System Settings. The **By Application** view has a reported FSKit toggle bug. If the category view remains unresponsive after several development installs, the explicit development helper is `make macos-enable`. It backs up and repairs the per-user FSKit state before restarting the FSKit agent.
 
-Enable FuseDock under **System Settings → General → Login Items & Extensions → File System Extensions**. Start the broker in one terminal:
+For Baidu, continue with [Mount Baidu NetDisk](#mount-baidu-netdisk-百度网盘). The managed `mount` and `daemon mount` commands start the account broker automatically.
+
+To manage the FSKit broker manually, start it in one terminal:
 
 ```sh
 bin/fusedock broker start --account pku \

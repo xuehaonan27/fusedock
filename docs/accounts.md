@@ -50,15 +50,18 @@ bin/fusedock account remove pku
 
 ## Use an account
 
+For Baidu, `bin/fusedock account add --provider baidu --name baidu` prompts for the application's AppKey and SecretKey and starts browser device authorization. The [Baidu mounting guide](baidu.md) covers setup, existing saved accounts, and native mounts on macOS, Linux and Windows.
+
 ```sh
 bin/fusedock ls --account pku
 bin/fusedock ls --account pku --path 'My library/Reports'
 ```
 
-On Linux, the same account can be mounted:
+On macOS with FSKit enabled, or Linux with FUSE available, the same saved-account command mounts in an existing empty directory:
 
 ```sh
-bin/fusedock mount --account pku /mnt/pku
+mkdir -p "$HOME/FuseDockPKU"
+bin/fusedock mount --account pku "$HOME/FuseDockPKU"
 ```
 
 Explicit `--credential`, `--credential-env`, `--credential-file`, and `--username` inputs cannot be mixed with `--account`. A `--option` can override non-secret metadata for one run; the saved account is not mutated.

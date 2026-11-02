@@ -114,6 +114,8 @@ The NFS bridge remains a future fallback for systems where FSKit or extension de
 
 ## Daemon mounting
 
+For an already authorized Baidu account, follow the [Baidu daemon mounting example](baidu.md#background-mount-with-the-daemon). It includes Finder access, unmounting, remote scope selection, and `--persistent-cache=false` for the current Baidu provider and legacy account records. The same FSKit installation serves both PKU and Baidu mounts.
+
 On macOS 26 or newer with the matching extension installed:
 
 ```sh
