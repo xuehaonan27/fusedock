@@ -61,7 +61,7 @@ func (Factory) Open(ctx context.Context, req provider.OpenRequest) (provider.Ses
 		return nil, errors.New("broker returned an incompatible capability response")
 	}
 	client.setToken(claim.Token)
-	return &Session{client: client, caps: claim.Capabilities}, nil
+	return &Session{client: client, caps: claim.Capabilities, namespacePublication: claim.NamespacePublication}, nil
 }
 
 type client struct {
@@ -114,10 +114,17 @@ func (c *client) post(ctx context.Context, path, token string, input, output any
 }
 
 type Session struct {
-	caps   provider.ReadCapabilities
-	client *client
-	mu     sync.Mutex
-	closed bool
+	namespacePublication bool
+	caps                 provider.ReadCapabilities
+	client               *client
+	mu                   sync.Mutex
+	closed               bool
+}
+
+func (s *Session) CanPublishNamespace() bool { return s.namespacePublication }
+
+func (s *Session) PublishNamespace(ctx context.Context, from, to string, directory bool) error {
+	return s.client.post(ctx, "/v2/publish", s.client.dataToken(), brokerapi.PublicationRequest{From: from, To: to, Remove: to == "", Directory: directory}, nil)
 }
 
 func (s *Session) Root(ctx context.Context) (provider.Object, error) {

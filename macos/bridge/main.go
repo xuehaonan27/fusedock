@@ -407,6 +407,37 @@ func fusedock_entry_ttl(token *C.FuseDockHandle) C.double {
 	return C.double(lookup(token).entryTTL.Seconds())
 }
 
+type namespacePublisher interface {
+	CanPublishNamespace() bool
+	PublishNamespace(context.Context, string, string, bool) error
+}
+
+//export fusedock_can_publish
+func fusedock_can_publish(token *C.FuseDockHandle) C.int {
+	publisher, ok := lookup(token).session.(namespacePublisher)
+	if ok && publisher.CanPublishNamespace() {
+		return 1
+	}
+	return 0
+}
+
+//export fusedock_publish
+func fusedock_publish(token *C.FuseDockHandle, from, to *C.char, directory C.int, errorOut **C.char) C.int {
+	state := lookup(token)
+	publisher, ok := state.session.(namespacePublisher)
+	if !ok || !publisher.CanPublishNamespace() {
+		setError(errorOut, provider.ErrUnsupported)
+		return -1
+	}
+	ctx, cancel := context.WithTimeout(state.ctx, 10*time.Second)
+	defer cancel()
+	if err := publisher.PublishNamespace(ctx, C.GoString(from), C.GoString(to), directory != 0); err != nil {
+		setError(errorOut, err)
+		return -1
+	}
+	return 0
+}
+
 func marshal(value any, errorOut **C.char) *C.char {
 	data, err := json.Marshal(value)
 	if err != nil {

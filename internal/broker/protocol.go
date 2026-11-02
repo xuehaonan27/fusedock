@@ -40,9 +40,24 @@ type ReadRequest struct {
 }
 
 type ClaimResponse struct {
-	Capabilities provider.ReadCapabilities `json:"capabilities"`
-	Version      int                       `json:"version"`
-	Token        string                    `json:"token"`
+	NamespacePublication bool                      `json:"namespace_publication,omitempty"`
+	Capabilities         provider.ReadCapabilities `json:"capabilities"`
+	Version              int                       `json:"version"`
+	Token                string                    `json:"token"`
+}
+
+// PublicationRequest publishes an already prepared local namespace change.
+// Both names are immediate children of this broker's mounted root. This is
+// separate from provider mutation: the remote session remains read-only.
+type PublicationRequest struct {
+	From      string `json:"from"`
+	To        string `json:"to"`
+	Remove    bool   `json:"remove,omitempty"`
+	Directory bool   `json:"directory,omitempty"`
+}
+
+func (r PublicationRequest) Valid() bool {
+	return provider.ValidName(r.From) && ((r.Remove && r.To == "") || (!r.Remove && provider.ValidName(r.To)))
 }
 
 type ErrorResponse struct {

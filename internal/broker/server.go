@@ -37,6 +37,7 @@ type Server struct {
 	expectedHost string
 	onClaim      func()
 	onClose      func()
+	publish      func(context.Context, PublicationRequest) error
 }
 
 func NewServer(session provider.Session, bootstrap string) (*Server, error) {
@@ -73,6 +74,12 @@ func (s *Server) SetOnClaim(callback func()) { s.onClaim = callback }
 func (s *Server) SetReadSlots(slots chan struct{}) { s.slots = slots }
 
 func (s *Server) SetOnClose(callback func()) { s.onClose = callback }
+
+func (s *Server) SetNamespacePublisher(publish func(context.Context, PublicationRequest) error) {
+	s.mu.Lock()
+	s.publish = publish
+	s.mu.Unlock()
+}
 
 func (s *Server) Handler() http.Handler { return http.HandlerFunc(s.serveHTTP) }
 
@@ -155,11 +162,12 @@ func (s *Server) serveHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		s.claimed, s.sessionToken = true, sess
 		callback := s.onClaim
+		publication := s.publish != nil
 		s.mu.Unlock()
 		if callback != nil {
 			callback()
 		}
-		writeJSON(w, http.StatusOK, ClaimResponse{Version: ProtocolVersion, Token: sess, Capabilities: s.caps})
+		writeJSON(w, http.StatusOK, ClaimResponse{Version: ProtocolVersion, Token: sess, Capabilities: s.caps, NamespacePublication: publication})
 		return
 	}
 
@@ -172,6 +180,24 @@ func (s *Server) serveHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	switch r.URL.Path {
+	case "/v2/publish":
+		var request PublicationRequest
+		if err := decodeJSON(r, &request); err != nil || !request.Valid() {
+			writeBrokerError(w, http.StatusBadRequest, "request", "publication requires two child names")
+			return
+		}
+		s.mu.Lock()
+		publish := s.publish
+		s.mu.Unlock()
+		if publish == nil {
+			writeProviderError(w, provider.ErrUnsupported)
+			return
+		}
+		if err := publish(r.Context(), request); err != nil {
+			writeBrokerError(w, http.StatusInternalServerError, "publication", "namespace publication failed")
+			return
+		}
+		writeJSON(w, http.StatusOK, struct{}{})
 	case "/v2/root":
 		s.handleRoot(w, r)
 	case "/v2/list":

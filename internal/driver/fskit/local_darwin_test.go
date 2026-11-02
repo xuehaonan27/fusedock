@@ -81,4 +81,21 @@ func testLocalMount(t *testing.T, root, point, content string) {
 			t.Fatal("read-only file opened for writing")
 		}
 	}
+	// Directory mode allows the host's one-use publication to reach FSKit.
+	// Public namespace mutations must still be rejected by the module.
+	file := filepath.Join(point, "file.txt")
+	for name, mutate := range map[string]func() error{
+		"create":             func() error { return os.WriteFile(filepath.Join(point, "created.txt"), []byte("no"), 0600) },
+		"mkdir":              func() error { return os.Mkdir(filepath.Join(point, "created"), 0700) },
+		"rename":             func() error { return os.Rename(file, filepath.Join(point, "renamed.txt")) },
+		"unlink":             func() error { return os.Remove(file) },
+		"forged publication": func() error { return os.Rename(file, filepath.Join(point, ".fusedock-publish-forged")) },
+	} {
+		if err := mutate(); err == nil {
+			t.Errorf("read-only mount accepted %s", name)
+		}
+	}
+	if got, err := os.ReadFile(file); err != nil || string(got) != content {
+		t.Fatalf("rejected mutations changed file: %q %v", got, err)
+	}
 }

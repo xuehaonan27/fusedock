@@ -16,6 +16,15 @@ extension FuseDockCachedFSVolume {
 
     func lookupItem(named name: FSFileName, in directory: FSItem, context: FSContext,
                     replyHandler reply: @escaping @Sendable (FSLookupItemResult?, (any Error)?) -> Void) {
+        if bridge.canPublishNamespace && directory === rootItem {
+            publicationLock.lock()
+            defer { publicationLock.unlock() }
+            guard let childName = name.string, let item = lookupPublishedRoot(childName) else { reply(nil, POSIXError(.ENOENT)); return }
+            let attrs = attributes(for: item.object, desired: FSLookupItemResult.requestedAttributes)
+            let result = FSLookupItemResult(foundItem: item, itemName: name, itemAttributes: attrs)
+            reply(result, result == nil ? POSIXError(.EIO) : nil)
+            return
+        }
         resolveEntry(named: name, inDirectory: directory) { item, name, error in
             guard let item = item as? FuseDockFSItem, let name else { reply(nil, error); return }
             item.readLock.lock()
@@ -32,6 +41,7 @@ extension FuseDockCachedFSVolume {
         request.wantedAttributes = desired.wantedAttributes.union(FSGetAttributesResult.requestedAttributes.wantedAttributes)
         readAttributes(request, of: item) { attrs, error in
             guard let attrs else { reply(nil, error); return }
+            if self.bridge.canPublishNamespace && item === self.rootItem { attrs.mode = 0o755 }
             let result = FSGetAttributesResult(attributes: attrs)
             reply(result, result == nil ? POSIXError(.EIO) : nil)
         }
@@ -41,6 +51,16 @@ extension FuseDockCachedFSVolume {
                             verifier: FSDirectoryVerifier, attributes: FSItem.GetAttributesRequest?,
                             packer: FSDirectoryEntryPacker, context: FSContext,
                             replyHandler reply: @escaping @Sendable (FSEnumerateDirectoryResult?, (any Error)?) -> Void) {
+        if bridge.canPublishNamespace && directory === rootItem {
+            let objects = rootObjects()
+            for (index, object) in objects.enumerated() where index >= Int(cookie.rawValue) {
+                let attrs = attributes.map { self.attributes(for: object, desired: $0) }
+                if !packer.packEntry(name: FSFileName(string: object.name), itemType: object.isDirectory ? .directory : .file,
+                    itemID: FSItem.Identifier(rawValue: object.nodeID)!, nextCookie: FSDirectoryCookie(UInt64(index + 1)), attributes: attrs) { break }
+            }
+            reply(FSEnumerateDirectoryResult(verifier: 0), nil)
+            return
+        }
         enumerateEntries(directory, startingAt: cookie, verifier: verifier, attributes: attributes, packer: packer) { verifier, error in
             if let error { reply(nil, error); return }
             reply(FSEnumerateDirectoryResult(verifier: verifier.rawValue), nil)
@@ -79,14 +99,18 @@ extension FuseDockCachedFSVolume {
 
     func removeItem(_ item: FSItem, named name: FSFileName, from directory: FSItem, context: FSContext,
                     replyHandler reply: @escaping @Sendable (FSRemoveItemResult?, (any Error)?) -> Void) {
-        reply(nil, POSIXError(.EROFS))
+        do { reply(try commitRemoval(item: item, directory: directory, name: name), nil) }
+        catch { reply(nil, error) }
     }
 
     func renameItem(_ item: FSItem, inDirectory sourceDirectory: FSItem, named sourceName: FSFileName,
                     to destinationName: FSFileName, inDirectory destinationDirectory: FSItem,
                     overItem: FSItem?, context: FSContext,
                     replyHandler reply: @escaping @Sendable (FSRenameItemResult?, (any Error)?) -> Void) {
-        reply(nil, POSIXError(.EROFS))
+        do {
+            reply(try commitPublication(item: item, sourceDirectory: sourceDirectory, sourceName: sourceName,
+                destinationDirectory: destinationDirectory, destinationName: destinationName, overItem: overItem), nil)
+        } catch { reply(nil, error) }
     }
 
     func setAttributes(_ newAttributes: FSItem.SetAttributesRequest, on item: FSItem, context: FSContext,

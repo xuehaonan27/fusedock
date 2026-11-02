@@ -55,6 +55,16 @@ final class FuseDockBridge {
 
     var entryTTL: TimeInterval { fusedock_entry_ttl(token) }
 
+    var canPublishNamespace: Bool { fusedock_can_publish(token) != 0 }
+
+    func publish(from: String, to: String, directory: Bool) throws {
+        var error: UnsafeMutablePointer<CChar>?
+        let result = Self.withCString(from) { source in
+            Self.withCString(to) { destination in fusedock_publish(token, source, destination, directory ? 1 : 0, &error) }
+        }
+        if result != 0 { throw Self.takeError(error, fallback: "Could not publish namespace change") }
+    }
+
     var volumeID: UUID {
         guard let value = fusedock_volume_id(token) else { return UUID() }
         defer { fusedock_free(value) }

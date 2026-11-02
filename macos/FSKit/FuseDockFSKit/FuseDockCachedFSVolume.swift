@@ -6,6 +6,16 @@ import OSLog
 @available(macOS 27.0, *)
 final class FuseDockCachedFSVolume: FuseDockFSVolume, FSVolume.Handler, FSVolume.ReadWriteHandler, FSVolume.DataCacheHandler {
     private var cacheTimer: DispatchSourceTimer?
+    let publicationLock = NSRecursiveLock()
+    var publishedRoot: [String: FuseDockObject] = [:]
+    var pendingPublication: FuseDockRootPublication?
+
+    override init(configPath: String) throws {
+        try super.init(configPath: configPath)
+        if bridge.canPublishNamespace {
+            publishedRoot = Dictionary(uniqueKeysWithValues: try bridge.list(parentID: rootItem.object.id).map { ($0.name, $0) })
+        }
+    }
 
     override func startCacheMaintenance() {
         let timer = DispatchSource.makeTimerSource(queue: DispatchQueue(label: "dev.fusedock.fskit.expiry", qos: .utility))
@@ -24,10 +34,15 @@ final class FuseDockCachedFSVolume: FuseDockFSVolume, FSVolume.Handler, FSVolume
     deinit { cacheTimer?.cancel() }
 
     private func expireDirectoryEntries() {
+        if bridge.canPublishNamespace {
+            do { try refreshRoot() }
+            catch { Logger.fusedock.error("Root publication failed: \(error.localizedDescription, privacy: .public)") }
+        }
         // Expiring directory names makes later opens resolve current metadata.
         // This does not poll providers or discard version-bound file blocks.
         let directories = itemQueue.sync { items.values.filter { $0.object.isDirectory } }
         for directory in directories {
+            if bridge.canPublishNamespace && directory === rootItem { continue }
             if let error = setCacheState(for: directory, cacheMode: .readWithCache,
                                         coherencyType: .readCache, action: .invalidate) {
                 let failure = error as NSError

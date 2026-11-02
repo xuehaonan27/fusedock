@@ -216,6 +216,10 @@ func runBroker(ctx context.Context, args []string, streams IO) int {
 		return 1
 	}
 	endpoint := "http://" + listener.Addr().String()
+	if err := platform.ConfigureBroker(server, *configPath); err != nil {
+		fmt.Fprintln(streams.Err, "fusedock: configure mounted namespace:", err)
+		return 1
+	}
 	server.SetExpectedHost(listener.Addr().String())
 	if *configPath != "" {
 		server.SetOnClaim(func() { _ = os.Remove(*configPath) })
