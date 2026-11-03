@@ -69,6 +69,7 @@ Acceptance: exact range and whole-object digest proofs have separate positive an
 - [x] Implement a versioned binary data plane with target-scoped, revocable access. Resolve authoritative objects server-side from NodeKey/revision requests.
 - [ ] Implement reconnectable peer authentication and endpoint discovery through the platform transport: signed XPC/UDS integration on macOS and OS-identity-aware local transports on Linux/Windows.
 - [ ] Integrate service startup, login/restart recovery, configured mount restoration, orderly shutdown, and explicit force-stop with each platform host.
+- [x] Keep the data service alive after a busy native unmount; allow retry. Reconcile macOS Finder/system eject, reuse the stopped ID/path, retry failed mount startup, and make `daemon stop` wait for cleanup before returning. Native busy/read/retry/eject/remount and real Baidu stop/start/restore checks pass; see [lifecycle acceptance](docs/foundation-status.md#mount-lifecycle-acceptance).
 - [ ] Restore authenticated operation after reauthentication while preserving mount identity and the contract of existing read snapshots.
 - [ ] Handle daemon restart, extension/driver restart, transport loss, and account reauthentication as distinct lifecycle events. Report whether existing reads resume or fail with the defined error; fresh reads use the restored session.
 - [ ] Carry request IDs through surface, daemon, VFS, and provider; expose bounded diagnostics without secrets, signed URLs, or file contents.

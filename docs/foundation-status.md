@@ -1,6 +1,6 @@
 # Filesystem foundation: implementation and evidence
 
-Updated 2026-11-02. [TODO.md](../TODO.md) remains the complete acceptance plan. This document records the current working tree and observed checks. The filesystem foundation has open acceptance and implementation items.
+Updated 2026-11-03. [TODO.md](../TODO.md) remains the complete acceptance plan. This document records the current working tree and observed checks. The filesystem foundation has open acceptance and implementation items.
 
 ## Implemented
 
@@ -96,7 +96,7 @@ On 2026-11-02, a second standalone Swift probe verified actual file contents: af
 1. Qualify real-provider revision changes and measure root metadata polling and Finder workloads. Root/nested native fixture acceptance is complete; the OS cache API reproducer remains an independent upstream test.
 2. Linux and Windows native contracts passed. Complete additional native inode/FORGET and path replacement coverage.
 3. Implement signed macOS peer reconnection and endpoint discovery after extension restart. The current one-use bootstrap does not recover a relaunched extension. Test transport, daemon, extension, and reauthentication recovery separately.
-4. Finish explicit forced shutdown, retry after a failed native unmount, and bounded shutdown behavior. Current errors remain visible; a failed native unmount may still leave the OS mount present.
+4. Finish explicit forced shutdown and signal-driven failure recovery. Retryable control-plane unmount, external-eject reconciliation and stop/start ordering are implemented and tested below.
 5. Complete accounting/admission for metadata in-flight allocations, object/node tables, reader tables, temporary files, and process overhead. Shared block payloads and request concurrency already have limits; some identity maps still grow with observed objects.
 6. Measure the implemented demand-read/adaptive-prefetch policy against real provider latency and Finder/QuickLook workloads. Fetch size is now independent of the 4 MiB storage block; the controlled and native small-read results are recorded below.
 7. Carry request IDs across the complete read path and expose bounded diagnostics. Add native workload measurements for Finder, QuickLook, media seeking, rate limiting, and TTL selection. Current TTL and whole-file limits are provisional.
@@ -124,6 +124,16 @@ go test ./internal/providers/baidu -run '^$' -bench BenchmarkBaiduReadDelivery -
 ```
 
 Deterministic regressions hold the tail of a prefetch HTTP response open and verify that foreground reads return its ready prefix. They also cover seek cancellation, concurrent download-link reuse and renewal, overlapping range reuse, failed partial responses, full-block assembly/restart, memory budgets, independent waiter cancellation and unchanged whole-object digest validation. The cancellation/sharing/provider cases additionally passed 20 repetitions with the race detector. No real account credentials are needed for these checks.
+
+## Mount lifecycle acceptance
+
+On 2026-11-03, the real Baidu daemon log contained an ordinary unmount failure (`Resource busy`) followed by `mountpoint must be an empty directory`. The old control flow revoked the target before requesting native unmount, and the macOS adapter closed its broker after unmount failed. This left a mounted OS volume without a working data service. The old stop command also acknowledged shutdown before cleanup finished, allowing an immediate start to race the previous process.
+
+Native adapters now register a retryable unmount operation through the common mount options. The daemon invokes it before revoking targets or closing data endpoints. A failed operation keeps state `mounted`, records the error and leaves reads available; a second unmount can succeed. macOS uses Disk Arbitration through `diskutil unmount`, bounds each attempt to 15 seconds and observes the kernel mount table without querying the remote filesystem. Finder/system eject releases the broker and automatic-restore intent, allowing the ID and path to be reused. Native identity checks distinguish the original mount from a replacement at the same path. Failed startup records can also be retried. `daemon stop` detaches first, retains mount intent for restart, and waits for endpoint/cache cleanup before returning.
+
+`TestFSKitBusyRetryAndExternalEject` passed on the installed macOS 27.2 extension: hold a file open, observe a busy unmount in about 230 ms, read successfully through that same descriptor, close it, retry unmount, externally force-eject a separate fixture and remount at the same path. The complete local FSKit suite also passed. Daemon fixtures cover busy retry, stop-intent retention, failed startup retry and externally detached mount-ID reuse; five race-enabled repetitions passed.
+
+The user's real Baidu mount was switched to the new daemon using ordinary macOS unmount. Native directory enumeration returned 139 entries before and after the following checks: daemon unmount (0.77 s), fresh mount, daemon stop (1.08 s), immediate daemon start (0.11 s) and automatic restore. The mounted volume was left available at `~/FuseDockBaidu`. No real-account files were modified.
 
 ## Runtime minimums
 

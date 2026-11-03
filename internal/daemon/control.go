@@ -43,6 +43,7 @@ func (d *Service) Serve(ctx context.Context) error {
 			}
 			return err
 		case <-d.ctx.Done():
+			closeErr := d.Close()
 			shutdown, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 			err := server.Shutdown(shutdown)
 			cancel()
@@ -50,7 +51,7 @@ func (d *Service) Serve(ctx context.Context) error {
 				server.Close()
 			}
 			<-done
-			return d.Close()
+			return closeErr
 		}
 	}
 }
@@ -130,7 +131,10 @@ func (d *Service) control(w http.ResponseWriter, r *http.Request) {
 		}
 		d.mu.Unlock()
 	case "/control/v1/shutdown":
-		d.cancel()
+		err = d.PrepareStop(r.Context())
+		if err == nil {
+			d.cancel()
+		}
 	default:
 		http.NotFound(w, r)
 		return

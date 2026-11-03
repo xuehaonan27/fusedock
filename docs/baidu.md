@@ -138,6 +138,10 @@ bin/fusedock daemon unmount --id baidu
 
 `bin/fusedock daemon stop` stops the whole daemon, including other mounts. `daemon start` starts a background process; login startup is a separate `daemon install` operation described in the [FSKit guide](macos-fskit.md#daemon-mounting).
 
+On macOS, daemon unmount uses Disk Arbitration (`diskutil unmount`) so Finder can release the volume. If an application still holds it open, the command reports the busy error and the mount remains readable. Close those files and retry `daemon unmount --id baidu`. A failed unmount also leaves `daemon stop` retryable. Successful `daemon stop` waits for cleanup before returning, and the next `daemon start` restores saved mounts.
+
+Ejecting through Finder or macOS also ends the daemon mount. The daemon detects its disappearance, releases the broker and removes automatic-restore intent; a new `daemon mount` can reuse the same ID and path. A failed initial mount can likewise be retried after correcting its reported cause.
+
 ### Foreground mount
 
 For a mount that lasts while a terminal stays open:
@@ -265,6 +269,7 @@ The capability file is consumed and removed during mounting. Keep the broker pro
 | Daemon state remains `mounting` or becomes `failed` | Check `daemon status` and its `error` field. Verify the platform driver/extension and mountpoint requirements. |
 | FSKit toggle does not respond | Use **By Category → File System Extensions**; see the [FSKit setup guide](macos-fskit.md). |
 | Mount ID or mountpoint is already active | Use the existing mount or unmount it before starting another workflow at that path. |
+| Unmount reports that the volume is busy | Close files open on that volume and retry `daemon unmount --id baidu`. The volume remains served after the failed attempt; `daemon status` shows the error alongside `mounted`. |
 | The daemon still uses an older CLI build | After finishing current file operations, run `daemon stop` and `daemon start` with the updated executable. Check `daemon status` for restored mounts before creating a mount again. |
 | Broker capability file disappeared | It is removed after the extension claims it. A new manual mount needs a newly started broker. |
 | Files can be listed but a read reports unsupported Range | Baidu did not honor the requested byte range. Listing access and ranged download support are checked separately; keep the reported error when diagnosing that file. |

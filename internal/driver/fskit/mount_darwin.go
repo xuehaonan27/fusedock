@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"time"
 
 	"golang.org/x/sys/unix"
 
@@ -31,6 +32,11 @@ func Preflight(path string) error {
 	}
 	if major < 26 {
 		return fmt.Errorf("FuseDock FSKit requires macOS 26 or later; this host runs %s", version)
+	}
+	if mounted, err := mountAt(path); err != nil {
+		return err
+	} else if mounted != nil {
+		return fmt.Errorf("mountpoint already has a mounted filesystem: %s", path)
 	}
 	entries, err := os.ReadDir(path)
 	if err != nil {
@@ -89,20 +95,45 @@ func Mount(ctx context.Context, s provider.Session, path string, o Options) erro
 	done := make(chan error, 1)
 	go func() { done <- server.Serve(serveCtx, listener) }()
 	if out, err := exec.CommandContext(ctx, "/sbin/mount", "-t", "fusedock", config, path).CombinedOutput(); err != nil {
+		cancel()
+		<-done
 		return fmt.Errorf("FSKit mount: %w: %s", err, out)
+	}
+	identity, err := mountAt(path)
+	if err != nil || identity == nil {
+		cancel()
+		<-done
+		if err != nil {
+			return err
+		}
+		return errors.New("FSKit mount disappeared before readiness")
+	}
+	native := &nativeMount{path: path, identity: *identity}
+	if o.RegisterUnmount != nil {
+		o.RegisterUnmount(native.unmount)
 	}
 	if o.Ready != nil {
 		o.Ready()
 	}
-	select {
-	case err := <-done:
-		exec.Command("/sbin/umount", path).Run()
-		return err
-	case <-ctx.Done():
+	ticker := time.NewTicker(200 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		select {
+		case err := <-done:
+			return errors.Join(err, native.unmount(context.Background()))
+		case <-ticker.C:
+			present, err := native.present()
+			if err != nil {
+				continue
+			}
+			if !present {
+				cancel()
+				return <-done
+			}
+		case <-ctx.Done():
+			err := native.unmount(context.Background())
+			cancel()
+			return errors.Join(err, <-done)
+		}
 	}
-	if out, err := exec.Command("/sbin/umount", path).CombinedOutput(); err != nil {
-		return fmt.Errorf("FSKit unmount: %w: %s", err, out)
-	}
-	cancel()
-	return <-done
 }

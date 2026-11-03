@@ -11,10 +11,6 @@ func Mount(ctx context.Context, s provider.Session, path string, o Options) erro
 	if !o.ReadOnly {
 		return errors.New("only read-only mounts are supported")
 	}
-	name := o.VolumeName
-	if name == "" {
-		name = "FuseDock"
-	}
-	return winfsp.Mount(ctx, s, path, name, o.Debug, o.Ready)
+	return winfsp.Mount(ctx, s, path, o)
 }
 func Preflight(path string) error { return winfsp.Preflight(path) }

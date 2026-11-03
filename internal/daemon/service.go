@@ -37,11 +37,15 @@ type MountStatus struct {
 	VolumeID string    `json:"volume_id,omitempty"`
 }
 type mounted struct {
-	status MountStatus
-	result error
-	cancel context.CancelFunc
-	done   chan struct{}
-	target *namespace.Target
+	unmountMu sync.Mutex
+	unmount   func(context.Context) error
+	detaching bool
+	ready     bool
+	status    MountStatus
+	result    error
+	cancel    context.CancelFunc
+	done      chan struct{}
+	target    *namespace.Target
 }
 type session struct {
 	account accounts.Account
@@ -71,6 +75,7 @@ type Service struct {
 	desired       map[string]MountSpec
 	closeOnce     sync.Once
 	closed        bool
+	stopping      bool
 }
 
 func New(o Options) (*Service, error) {
@@ -244,11 +249,20 @@ func (d *Service) Mount(ctx context.Context, spec MountSpec) (MountStatus, error
 	mountCtx, cancel := context.WithCancel(d.ctx)
 	m := &mounted{status: MountStatus{Spec: spec, State: "mounting", VolumeID: target.VolumeID()}, cancel: cancel, done: make(chan struct{}), target: target}
 	d.mu.Lock()
-	if d.closed {
+	if d.closed || d.stopping {
 		d.mu.Unlock()
 		cancel()
 		target.Revoke()
-		return MountStatus{}, errors.New("daemon closed")
+		return MountStatus{}, errors.New("daemon is stopping or closed")
+	}
+	for id, old := range d.mounts {
+		select {
+		case <-old.done:
+			if old.result == nil || !old.ready {
+				delete(d.mounts, id)
+			}
+		default:
+		}
 	}
 	if _, ok := d.mounts[spec.ID]; ok {
 		d.mu.Unlock()
@@ -278,7 +292,11 @@ func (d *Service) Mount(ctx context.Context, spec MountSpec) (MountStatus, error
 	d.mu.Unlock()
 	go func() {
 		defer close(m.done)
-		err := d.options.Mount(mountCtx, target, spec.Path, mountapi.Options{ReadSlots: d.readSlots, ReadOnly: true, VolumeName: "FuseDock", Ready: func() { d.mu.Lock(); m.status.State = "mounted"; d.mu.Unlock() }})
+		err := d.options.Mount(mountCtx, target, spec.Path, mountapi.Options{
+			ReadSlots: d.readSlots, ReadOnly: true, VolumeName: "FuseDock",
+			RegisterUnmount: func(unmount func(context.Context) error) { d.mu.Lock(); m.unmount = unmount; d.mu.Unlock() },
+			Ready:           func() { d.mu.Lock(); m.ready = true; m.status.State = "mounted"; d.mu.Unlock() },
+		})
 		target.Revoke()
 		d.mu.Lock()
 		m.result = err
@@ -287,20 +305,54 @@ func (d *Service) Mount(ctx context.Context, spec MountSpec) (MountStatus, error
 			m.status.State = "failed"
 			m.status.Error = err.Error()
 		}
+		if err == nil && mountCtx.Err() == nil && !m.detaching {
+			// Finder/system eject ends the mount's intent as well as its worker.
+			delete(d.desired, spec.ID)
+			if saveErr := d.saveLocked(); saveErr != nil {
+				m.status.Error = saveErr.Error()
+			}
+		}
 		d.mu.Unlock()
 	}()
 	return status, nil
 }
 func (d *Service) Unmount(ctx context.Context, id string) error {
+	return d.unmount(ctx, id, true)
+}
+
+func (d *Service) unmount(ctx context.Context, id string, forget bool) error {
 	d.mu.Lock()
 	m := d.mounts[id]
 	if m == nil {
-		delete(d.desired, id)
+		if forget {
+			delete(d.desired, id)
+		}
 		err := d.saveLocked()
 		d.mu.Unlock()
 		return err
 	}
+	d.mu.Unlock()
+	m.unmountMu.Lock()
+	defer m.unmountMu.Unlock()
+	d.mu.Lock()
+	if d.mounts[id] != m {
+		d.mu.Unlock()
+		return nil
+	}
 	m.status.State = "unmounting"
+	m.detaching = true
+	unmount := m.unmount
+	d.mu.Unlock()
+	if unmount != nil {
+		if err := unmount(ctx); err != nil {
+			d.mu.Lock()
+			m.detaching = false
+			m.status.State, m.status.Error = "mounted", err.Error()
+			d.mu.Unlock()
+			return err
+		}
+	}
+	d.mu.Lock()
 	for _, endpoint := range d.data {
 		if endpoint.mountID == id {
 			endpoint.cancel()
@@ -318,16 +370,46 @@ func (d *Service) Unmount(ctx context.Context, id string) error {
 	}
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	if m.result != nil {
+	if d.mounts[id] != m {
+		return nil
+	}
+	if m.result != nil && m.ready {
 		m.status.State = "failed"
 		return m.result
 	}
-	delete(d.desired, id)
-	if err := d.saveLocked(); err != nil {
-		d.desired[id] = m.status.Spec
-		return err
+	if forget {
+		delete(d.desired, id)
+		if err := d.saveLocked(); err != nil {
+			d.desired[id] = m.status.Spec
+			return err
+		}
 	}
 	delete(d.mounts, id)
+	return nil
+}
+
+// PrepareStop detaches native volumes before shutting down provider sessions.
+// A busy native volume keeps its data service alive and can be retried.
+func (d *Service) PrepareStop(ctx context.Context) error {
+	d.mu.Lock()
+	if d.stopping {
+		d.mu.Unlock()
+		return errors.New("daemon is already stopping")
+	}
+	d.stopping = true
+	ids := make([]string, 0, len(d.mounts))
+	for id := range d.mounts {
+		ids = append(ids, id)
+	}
+	d.mu.Unlock()
+	for _, id := range ids {
+		if err := d.unmount(ctx, id, false); err != nil {
+			d.mu.Lock()
+			d.stopping = false
+			d.mu.Unlock()
+			return err
+		}
+	}
 	return nil
 }
 func (d *Service) Status() []MountStatus {

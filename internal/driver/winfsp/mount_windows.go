@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"github.com/winfsp/cgofuse/fuse"
+	"github.com/xuehaonan27/fusedock/internal/mountapi"
 	"github.com/xuehaonan27/fusedock/internal/namespace"
 	"github.com/xuehaonan27/fusedock/pkg/provider"
 	"io"
@@ -191,7 +192,11 @@ func errno(err error) int {
 	}
 	return -fuse.EIO
 }
-func Mount(ctx context.Context, s provider.Session, path, name string, debug bool, ready func()) error {
+func Mount(ctx context.Context, s provider.Session, path string, options mountapi.Options) error {
+	name := options.VolumeName
+	if name == "" {
+		name = "FuseDock"
+	}
 	if err := Preflight(path); err != nil {
 		return err
 	}
@@ -202,7 +207,7 @@ func Mount(ctx context.Context, s provider.Session, path, name string, debug boo
 	host := fuse.NewFileSystemHost(f)
 	host.SetCapReaddirPlus(true)
 	args := []string{"-o", "ro,use_ino,volname=" + name}
-	if debug {
+	if options.Debug {
 		args = append(args, "-d")
 	}
 	done := make(chan bool, 1)
@@ -238,8 +243,28 @@ func Mount(ctx context.Context, s provider.Session, path, name string, debug boo
 		case <-ticker.C:
 		}
 	}
-	if ready != nil {
-		ready()
+	var unmountMu sync.Mutex
+	detached := false
+	unmount := func(request context.Context) error {
+		unmountMu.Lock()
+		defer unmountMu.Unlock()
+		if detached {
+			return nil
+		}
+		if err := request.Err(); err != nil {
+			return err
+		}
+		if !host.Unmount() {
+			return errors.New("WinFsp unmount failed")
+		}
+		detached = true
+		return nil
+	}
+	if options.RegisterUnmount != nil {
+		options.RegisterUnmount(unmount)
+	}
+	if options.Ready != nil {
+		options.Ready()
 	}
 	select {
 	case ok := <-done:
@@ -248,8 +273,8 @@ func Mount(ctx context.Context, s provider.Session, path, name string, debug boo
 		}
 		return nil
 	case <-ctx.Done():
-		if !host.Unmount() {
-			return errors.New("WinFsp unmount failed")
+		if err := unmount(context.Background()); err != nil {
+			return err
 		}
 		<-done
 		return nil

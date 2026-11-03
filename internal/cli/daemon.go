@@ -168,6 +168,28 @@ func runDaemon(ctx context.Context, args []string, streams IO) int {
 	if err := daemon.Call(ctx, *dir, operation, input, &output); err != nil {
 		return fail(err)
 	}
+	if operation == "shutdown" {
+		// Shutdown acknowledgement precedes process exit. Wait until the
+		// daemon has released mounts/cache ownership and closed its endpoint.
+		waitCtx, cancel := context.WithTimeout(ctx, 20*time.Second)
+		defer cancel()
+		ticker := time.NewTicker(50 * time.Millisecond)
+		defer ticker.Stop()
+		for {
+			var status any
+			if err := daemon.Call(waitCtx, *dir, "status", struct{}{}, &status); err != nil {
+				if waitCtx.Err() != nil {
+					return fail(waitCtx.Err())
+				}
+				break
+			}
+			select {
+			case <-waitCtx.Done():
+				return fail(waitCtx.Err())
+			case <-ticker.C:
+			}
+		}
+	}
 	encoder := json.NewEncoder(streams.Out)
 	encoder.SetIndent("", "  ")
 	if err := encoder.Encode(output); err != nil {

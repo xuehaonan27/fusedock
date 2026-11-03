@@ -206,6 +206,9 @@ func (r *reader) fillRange(ctx context.Context, b []byte, off int64, publish fun
 func (r *reader) Close() error {
 	r.cancel()
 	r.stopPrefetch()
+	if r.scope != "" {
+		r.session.blocks.DiscardScope(r.session.namespace, r.scope)
+	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if r.closed {
@@ -215,9 +218,6 @@ func (r *reader) Close() error {
 	r.session.readersMu.Lock()
 	delete(r.session.readers, r)
 	r.session.readersMu.Unlock()
-	if r.scope != "" {
-		r.session.blocks.DiscardScope(r.session.namespace, r.scope)
-	}
 	if r.remote != nil {
 		return r.remote.Close()
 	}

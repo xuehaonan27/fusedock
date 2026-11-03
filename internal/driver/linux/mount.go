@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -65,17 +66,34 @@ func Mount(ctx context.Context, session provider.Session, mountpoint string, opt
 	if err != nil {
 		return mountError(err)
 	}
-	if options.Ready != nil {
-		options.Ready()
-	}
 	done := make(chan struct{})
 	go func() {
 		server.Wait()
 		close(done)
 	}()
+	var unmountMu sync.Mutex
+	unmount := func(request context.Context) error {
+		unmountMu.Lock()
+		defer unmountMu.Unlock()
+		if err := request.Err(); err != nil {
+			return err
+		}
+		select {
+		case <-done:
+			return nil
+		default:
+		}
+		return server.Unmount()
+	}
+	if options.RegisterUnmount != nil {
+		options.RegisterUnmount(unmount)
+	}
+	if options.Ready != nil {
+		options.Ready()
+	}
 	select {
 	case <-ctx.Done():
-		if err := server.Unmount(); err != nil {
+		if err := unmount(context.Background()); err != nil {
 			return fmt.Errorf("unmount: %w", err)
 		}
 		<-done

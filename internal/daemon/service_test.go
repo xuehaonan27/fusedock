@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"github.com/xuehaonan27/fusedock/internal/accounts"
 	"github.com/xuehaonan27/fusedock/internal/credentials"
 	"github.com/xuehaonan27/fusedock/internal/mountapi"
@@ -183,6 +184,7 @@ func TestUnmountFailureRemainsVisible(t *testing.T) {
 	d := &Service{
 		options: Options{Directory: t.TempDir()},
 		mounts: map[string]*mounted{"busy": {
+			ready:  true,
 			status: MountStatus{Spec: MountSpec{ID: "busy"}, State: "failed", Error: want.Error()},
 			result: want, done: done, cancel: func() {},
 		}},
@@ -224,5 +226,144 @@ func TestLegacyAccountPersistenceRequiresStableIdentity(t *testing.T) {
 	_, err = d.Mount(context.Background(), MountSpec{ID: "test", Account: "old", Path: filepath.Join(base, "mount"), Persistent: true})
 	if err == nil || !strings.Contains(err.Error(), "AccountID") {
 		t.Fatalf("legacy persistence returned %v", err)
+	}
+}
+
+func TestRetryableUnmountKeepsSessionAndStopIntent(t *testing.T) {
+	for _, stop := range []bool{false, true} {
+		t.Run(fmt.Sprint(stop), func(t *testing.T) {
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			done := make(chan struct{})
+			spec := MountSpec{ID: "busy"}
+			attempts := 0
+			m := &mounted{status: MountStatus{Spec: spec, State: "mounted"}, cancel: cancel, done: done}
+			m.unmount = func(context.Context) error {
+				attempts++
+				if attempts == 1 {
+					return errors.New("native busy")
+				}
+				return nil
+			}
+			d := &Service{options: Options{Directory: t.TempDir()}, mounts: map[string]*mounted{"busy": m}, desired: map[string]MountSpec{"busy": spec}}
+			go func() { <-ctx.Done(); close(done) }()
+			detach := func() error {
+				if stop {
+					return d.PrepareStop(context.Background())
+				}
+				return d.Unmount(context.Background(), "busy")
+			}
+			if err := detach(); err == nil {
+				t.Fatal("busy unmount succeeded")
+			}
+			if ctx.Err() != nil {
+				t.Fatal("busy unmount cancelled native service")
+			}
+			if got := d.Status()[0]; got.State != "mounted" || got.Error == "" {
+				t.Fatalf("busy status: %+v", got)
+			}
+			if _, ok := d.desired["busy"]; !ok {
+				t.Fatal("busy volume lost mount intent")
+			}
+			if err := detach(); err != nil {
+				t.Fatal(err)
+			}
+			if len(d.mounts) != 0 {
+				t.Fatal("successful detach retained mount")
+			}
+			_, saved := d.desired["busy"]
+			if saved != stop {
+				t.Fatalf("saved=%v stop=%v", saved, stop)
+			}
+		})
+	}
+}
+
+func TestExternalDetachAndFailedStartAllowRemount(t *testing.T) {
+	base := t.TempDir()
+	root := filepath.Join(base, "files")
+	if err := os.Mkdir(root, 0700); err != nil {
+		t.Fatal(err)
+	}
+	store := &accounts.Store{Path: filepath.Join(base, "accounts", "accounts.json"), Secrets: &secretStore{values: map[string]string{}}}
+	if err := store.Add(context.Background(), accounts.Account{Name: "local", Provider: "local", Username: "fixture", Options: map[string]string{"root": root}, BindingFields: map[string]string{"root": root}}, map[string][]byte{"fixture": []byte("fixture")}, true, false); err != nil {
+		t.Fatal(err)
+	}
+	registry, err := providers.Builtin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	attached := make(chan chan struct{}, 1)
+	starts := 0
+	d, err := New(Options{Directory: filepath.Join(base, "daemon"), Accounts: store, Registry: registry, Mount: func(ctx context.Context, s provider.Session, path string, o mountapi.Options) error {
+		starts++
+		if starts == 1 {
+			return errors.New("initial native mount failed")
+		}
+		eject := make(chan struct{})
+		o.RegisterUnmount(func(context.Context) error { close(eject); return nil })
+		o.Ready()
+		attached <- eject
+		select {
+		case <-eject:
+			return nil
+		case <-ctx.Done():
+			return nil
+		}
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer d.Close()
+	spec := MountSpec{ID: "test", Account: "local", Path: filepath.Join(base, "mount"), Scope: "/"}
+	if _, err := d.Mount(context.Background(), spec); err != nil {
+		t.Fatal(err)
+	}
+	wait := func() {
+		t.Helper()
+		d.mu.Lock()
+		done := d.mounts[spec.ID].done
+		d.mu.Unlock()
+		select {
+		case <-done:
+		case <-time.After(time.Second):
+			t.Fatal("mount worker did not exit")
+		}
+	}
+	wait()
+	if _, err := d.Mount(context.Background(), spec); err != nil {
+		t.Fatalf("failed start blocked retry: %v", err)
+	}
+	close(<-attached)
+	wait()
+	d.mu.Lock()
+	_, saved := d.desired[spec.ID]
+	d.mu.Unlock()
+	if saved {
+		t.Fatal("external eject retained automatic restore intent")
+	}
+	if _, err := d.Mount(context.Background(), spec); err != nil {
+		t.Fatalf("external eject blocked remount: %v", err)
+	}
+	<-attached
+	if err := d.PrepareStop(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if _, saved := d.desired[spec.ID]; !saved {
+		t.Fatal("daemon stop discarded restore intent")
+	}
+}
+
+func TestStopAfterFailedStartupReleasesRegistration(t *testing.T) {
+	done := make(chan struct{})
+	close(done)
+	d := &Service{options: Options{Directory: t.TempDir()}, mounts: map[string]*mounted{"failed": {
+		status: MountStatus{Spec: MountSpec{ID: "failed"}, State: "failed"}, result: errors.New("mountpoint missing"), done: done, cancel: func() {},
+	}}, desired: map[string]MountSpec{"failed": {ID: "failed"}}}
+	if err := d.PrepareStop(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if len(d.mounts) != 0 || len(d.desired) != 1 {
+		t.Fatal("failed-start cleanup changed mount intent")
 	}
 }
